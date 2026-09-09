@@ -141,7 +141,34 @@ TARGET_LIVE_PROBE = {
     "fulfil": ["Shipping Arrives by October 29 Preorder"],
 }
 
+# The false positive that shipped: a fresh headless browser with no saved
+# zip code renders an enabled-looking Preorder control while every
+# fulfilment method still reads "Not available".
+TARGET_HEADLESS_TRAP = {
+    "btns": [
+        {"dt": "", "text": "Preorder", "disabled": False},
+    ],
+    "fulfil": ["Pickup Not available Delivery Not available Shipping Not available Coming October 29"],
+}
+
+# Pickup unavailable but shipping fine -- must still count as buyable.
+MIXED_FULFILMENT = {
+    "btns": [{"dt": "", "text": "Add to cart", "disabled": False}],
+    "fulfil": ["Pickup Not available Shipping Arrives by Oct 29"],
+}
+
 BROWSER_CASES = [
+    (
+        "REGRESSION: enabled button + all fulfilment dead -> out of stock",
+        TARGET_HEADLESS_TRAP,
+        Status.OUT_OF_STOCK,
+    ),
+    ("mixed fulfilment (shipping live) -> in stock", MIXED_FULFILMENT, Status.IN_STOCK),
+    (
+        "data-test 'Preorder.Disabled' counts as disabled",
+        {"btns": [{"dt": "Preorder.Disabled", "text": "Preorder", "disabled": True}], "fulfil": []},
+        Status.OUT_OF_STOCK,
+    ),
     ("browser: disabled Preorder button -> out of stock", TARGET_SOLD_OUT_PROBE, Status.OUT_OF_STOCK),
     ("browser: enabled Preorder button -> preorder", TARGET_LIVE_PROBE, Status.PREORDER),
     (

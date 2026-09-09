@@ -6,8 +6,8 @@ failure and does not prevent the others from firing -- the whole point is
 that you find out, so no single broken integration should be able to
 swallow the news.
 
-Configure by setting environment variables; a channel turns itself on when
-its variables are present.
+Configure by setting environment variables (or .env); a channel turns
+itself on when its variables are present.
 
   Discord   DISCORD_WEBHOOK_URL
   Pushover  PUSHOVER_TOKEN, PUSHOVER_USER
@@ -16,14 +16,26 @@ its variables are present.
 
 from __future__ import annotations
 
+import json
 import os
 import smtplib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
 import requests
 
 TIMEOUT = 15
+
+# Colour carries meaning at a glance on a phone, before any text is read.
+COLORS = {
+    "in_stock": 0x2ECC71,   # green  - go now
+    "preorder": 0xF1C40F,   # yellow - go now, it's a pre-order
+    "health": 0xE67E22,     # orange - something is degraded
+    "feed": 0x5865F2,       # blurple - social tip, unverified
+    "heartbeat": 0x95A5A6,  # grey   - routine
+    "test": 0x3498DB,       # blue   - test
+}
 
 
 def _clean(name: str) -> str:
@@ -42,6 +54,12 @@ class Alert:
     cart_url: str | None = None
     price: str | None = None
     urgent: bool = True
+    kind: str = "in_stock"
+    #: [(name, value, inline)] rendered as embed fields.
+    fields: list[tuple[str, str, bool]] = field(default_factory=list)
+    #: PNG bytes of the buy box, attached so you can judge it yourself.
+    image_png: bytes | None = None
+    footer: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -52,29 +70,47 @@ def _discord(alert: Alert) -> None:
     if not webhook:
         return
 
-    fields = []
-    if alert.price:
-        fields.append({"name": "Price", "value": alert.price, "inline": True})
-    if alert.cart_url:
-        fields.append(
-            {"name": "Add to cart", "value": f"[Tap here]({alert.cart_url})", "inline": True}
-        )
+    fields = [
+        {"name": name, "value": value[:1024], "inline": inline}
+        for name, value, inline in alert.fields
+        if value
+    ][:25]
 
-    payload = {
-        # Plain content (not just the embed) so the mobile push preview
-        # actually shows the news on your lock screen.
-        "content": ("@here " if alert.urgent else "") + alert.title,
-        "embeds": [
-            {
-                "title": alert.title,
-                "description": alert.body[:4000],
-                "url": alert.url,
-                "color": 0xE03131 if alert.urgent else 0x868E96,
-                "fields": fields,
-            }
-        ],
+    embed = {
+        "title": alert.title[:256],
+        "description": alert.body[:4000],
+        "color": COLORS.get(alert.kind, 0x95A5A6),
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": (alert.footer or "Zelda Switch 2 monitor")[:2048]},
     }
-    resp = requests.post(webhook, json=payload, timeout=TIMEOUT)
+    if alert.url:
+        embed["url"] = alert.url
+    if alert.image_png:
+        embed["image"] = {"url": "attachment://buybox.png"}
+
+    payload = {"embeds": [embed]}
+    # Plain content as well as the embed, so the phone's lock-screen preview
+    # shows the news rather than an empty "sent an embed" line.
+    if alert.urgent:
+        bits = ["@here", alert.title]
+        if alert.cart_url:
+            bits.append(f"\nCart: {alert.cart_url}")
+        elif alert.url:
+            bits.append(f"\n{alert.url}")
+        payload["content"] = " ".join(bits)[:2000]
+    else:
+        payload["content"] = alert.title[:2000]
+
+    if alert.image_png:
+        resp = requests.post(
+            webhook,
+            data={"payload_json": json.dumps(payload)},
+            files={"files[0]": ("buybox.png", alert.image_png, "image/png")},
+            timeout=TIMEOUT + 15,
+        )
+    else:
+        resp = requests.post(webhook, json=payload, timeout=TIMEOUT)
     resp.raise_for_status()
 
 
@@ -90,7 +126,7 @@ def _pushover(alert: Alert) -> None:
     data = {
         "token": token,
         "user": user,
-        "title": alert.title,
+        "title": alert.title[:250],
         "message": alert.body[:1000],
         "url": alert.cart_url or alert.url or "",
         "url_title": "Add to cart" if alert.cart_url else "Open product page",
@@ -102,12 +138,14 @@ def _pushover(alert: Alert) -> None:
     else:
         data["priority"] = -1  # quiet, no sound
 
-    resp = requests.post("https://api.pushover.net/1/messages.json", data=data, timeout=TIMEOUT)
+    files = {"attachment": ("buybox.png", alert.image_png, "image/png")} if alert.image_png else None
+    resp = requests.post("https://api.pushover.net/1/messages.json",
+                         data=data, files=files, timeout=TIMEOUT + 15)
     resp.raise_for_status()
 
 
 # ---------------------------------------------------------------------------
-# Carrier email-to-SMS gateway (free, but slow -- keep as a backup only)
+# Carrier email-to-SMS gateway (free, but slow -- backup only)
 # ---------------------------------------------------------------------------
 def _sms(alert: Alert) -> None:
     to_number = _clean("SMS_TO_NUMBER")
@@ -117,7 +155,7 @@ def _sms(alert: Alert) -> None:
     if not all([to_number, gateway, gmail_user, gmail_pass]):
         return
     if not alert.urgent:
-        return  # don't burn texts on health warnings
+        return  # don't burn texts on routine messages
 
     text = f"{alert.title}\n{alert.cart_url or alert.url or ''}"
     msg = MIMEText(text)

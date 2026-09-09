@@ -2,10 +2,10 @@
   "version": 2,
   "products": {
     "target": {
-      "status": "in_stock",
-      "since": 1788922898.029309,
+      "status": "out_of_stock",
+      "since": 1788924715.629317,
       "last_alert_ts": 1788924230.6614366,
-      "alert_count": 2,
+      "alert_count": 0,
       "bad_since": null,
       "last_health_alert_ts": 0.0
     },
@@ -40,10 +40,19 @@
       "alert_count": 0,
       "bad_since": 1788922991.8509529,
       "last_health_alert_ts": 0.0
+    },
+    "gamestop": {
+      "status": "out_of_stock",
+      "since": 1788924631.6776924,
+      "last_alert_ts": 0.0,
+      "alert_count": 0,
+      "bad_since": null,
+      "last_health_alert_ts": 0.0
     }
   },
   "feeds": {
     "seen": [],
-    "last_check": 1788924327.125124
-  }
+    "last_check": 1788925046.3073163
+  },
+  "last_heartbeat_date": "2026-09-08"
 }

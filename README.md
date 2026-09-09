@@ -267,15 +267,45 @@ structure moved and the phrase layer is correctly declining to guess.
 
 ---
 
+## Trust and self-checking
+
+This bot fired two false "IN STOCK" alerts during development. Everything
+below exists because of that.
+
+**Confirm before alerting.** Any positive reading is re-checked a few
+seconds later and the alert only fires if both agree. The gate can only
+suppress an alert, never create one — a real restock is still there six
+seconds later, a rendering artefact isn't. `CONFIRM_BEFORE_ALERT=0` disables it.
+
+**Screenshots.** Stock alerts carry a picture of the actual buy box, so you
+can judge it yourself in one glance rather than trusting a verdict.
+`ALERT_SCREENSHOTS=0` disables it.
+
+**Check log.** Every reading is appended to `checks.csv` (gitignored), so
+"was it briefly available overnight?" is answerable after the fact.
+
+**`--probe`.** When a verdict looks wrong, this shows you exactly what the
+detector saw — every buy control with its disabled state, the fulfilment
+panel, and the reasoning:
+
+```
+python stock_monitor.py --probe target
+python stock_monitor.py --probe bestbuy
+```
+
 ## Daily check-in
 
-Once a day at or after 8am local, the bot posts a quiet summary of what it
-currently sees. Without it, "no alerts" is ambiguous — it could mean the
-console is still unavailable, or it could mean the terminal got closed
-three days ago. The 90-minute health alert catches hard failures; this
-catches the soft ones (a closed laptop, an overnight reboot).
+Once a day between 8am and 11am local, the bot posts a quiet summary. It
+reports the *current* reading and says plainly when that's stale — e.g.
+`❓ unknown (last known: in_stock, last read 2h ago)` — because a check-in
+that silently shows a days-old status is worse than none.
 
-Set `HEARTBEAT_HOUR` to move it, or `HEARTBEAT_ENABLED=0` to turn it off.
+Without it, "no alerts" is ambiguous: still unavailable, or terminal closed
+three days ago? The 90-minute health alert catches hard failures; this
+catches the soft ones.
+
+`HEARTBEAT_HOUR` moves it, `HEARTBEAT_WINDOW_HOURS` widens the window,
+`HEARTBEAT_ENABLED=0` turns it off.
 
 ## Which retailers need what
 

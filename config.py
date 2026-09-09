@@ -135,6 +135,14 @@ MAX_RETRIES = _int("MAX_RETRIES", 3)
 # ---------------------------------------------------------------------------
 # Keep re-alerting while an item stays buyable -- one missed notification
 # shouldn't cost you the console.
+# Re-check once before firing an alert. Every false positive this bot has
+# produced came from a single weak reading; a second look a few seconds
+# later costs nothing and catches transient hydration states, a page that
+# rendered mid-update, and one-off network oddities.
+CONFIRM_BEFORE_ALERT = (os.environ.get("CONFIRM_BEFORE_ALERT", "1").strip().lower()
+                        not in ("0", "false", "no", ""))
+CONFIRM_DELAY_SECONDS = _int("CONFIRM_DELAY_SECONDS", 6)
+
 REALERT_MINUTES = _int("REALERT_MINUTES", 20)
 MAX_REALERTS = _int("MAX_REALERTS", 6)
 
@@ -151,6 +159,20 @@ HEALTH_ALERT_COOLDOWN_MINUTES = _int("HEALTH_ALERT_COOLDOWN_MINUTES", 360)
 HEARTBEAT_ENABLED = (os.environ.get("HEARTBEAT_ENABLED", "1").strip().lower()
                      not in ("0", "false", "no", ""))
 HEARTBEAT_HOUR = _int("HEARTBEAT_HOUR", 8)
+# Only send within this many hours of HEARTBEAT_HOUR. Without a window,
+# "hour >= 8" is true all evening, so restarting at 11pm fired it instantly.
+HEARTBEAT_WINDOW_HOURS = _int("HEARTBEAT_WINDOW_HOURS", 3)
+
+# Append every check to a CSV so questions like "was it ever briefly
+# available overnight?" are answerable after the fact.
+LOG_CSV = os.environ.get("LOG_CSV", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "checks.csv"))
+LOG_ENABLED = (os.environ.get("LOG_ENABLED", "1").strip().lower()
+               not in ("0", "false", "no", ""))
+
+# Attach a screenshot of the buy box to stock alerts.
+ALERT_SCREENSHOTS = (os.environ.get("ALERT_SCREENSHOTS", "1").strip().lower()
+                     not in ("0", "false", "no", ""))
 
 # ---------------------------------------------------------------------------
 # Social feed watching (@Wario64 etc). Best-effort -- see feeds.py.

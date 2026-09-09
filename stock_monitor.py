@@ -98,27 +98,77 @@ def entry_for(state: dict, key: str) -> dict:
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
+
+def confirmed(product: dict, first: detect.Result) -> bool:
+    """
+    Re-check a positive reading before waking someone up.
+
+    Asymmetric on purpose: this gate only ever suppresses alerts, never
+    creates them. A restock that is real will still be there six seconds
+    later; a rendering artefact will not.
+    """
+    if not config.CONFIRM_BEFORE_ALERT:
+        return True
+
+    print(f"    confirming {first.status.value} ({first.source})...")
+    time.sleep(config.CONFIRM_DELAY_SECONDS)
+    second = detect.check(product)
+
+    if second.alertable:
+        print(f"    confirmed by {second.source}: {second.status.value}")
+        return True
+
+    print(f"    NOT confirmed - second check said {second.status.value} "
+          f"({second.source}: {second.reason[:110]}). Suppressing alert.")
+    return False
+
+
 def build_alert(product: dict, result: detect.Result, repeat: int) -> notify.Alert:
     headline = "IN STOCK" if result.status is Status.IN_STOCK else "PRE-ORDER OPEN"
     if product.get("kind") == "appears":
         headline = "SHOWED UP"
 
-    title = f"{ICON[result.status]} {headline} - {product['name']} - Zelda Switch 2"
+    title = f"{ICON[result.status]} {headline} - {product['name']}"
     if repeat > 1:
         title += f" (reminder {repeat})"
 
-    lines = [f"**{product['name']}** - {headline}", "", result.reason, "", product["url"]]
+    fields = [
+        ("Retailer", product["name"], True),
+        ("Price", result.price or "-", True),
+        ("Detected via", result.source, True),
+    ]
     if product.get("cart_url"):
-        lines += ["", f"Straight to cart: {product['cart_url']}"]
-    lines += ["", f"Detected {stamp()} via {result.source}"]
+        fields.append(("Add to cart", f"[Tap here]({product['cart_url']})", False))
+    fields.append(("Product page", f"[{product['name']}]({product['url']})", False))
+    fields.append(("Why", result.reason[:1000], False))
+
+    screenshot = None
+    if config.ALERT_SCREENSHOTS:
+        try:
+            import browser_detect
+
+            screenshot = browser_detect.capture_buybox(product)
+        except Exception:  # noqa: BLE001 - a screenshot must never block an alert
+            screenshot = None
+
+    body = (
+        f"**{product['name']}** is showing as **{headline}**.\n\n"
+        "Go now - these sell out in minutes."
+    )
+    if screenshot is None and config.ALERT_SCREENSHOTS:
+        body += "\n\n_(Couldn't capture the page; verify before trusting this.)_"
 
     return notify.Alert(
         title=title,
-        body="\n".join(lines),
+        body=body,
         url=product["url"],
         cart_url=product.get("cart_url"),
         price=result.price,
         urgent=True,
+        kind=result.status.value,
+        fields=fields,
+        image_png=screenshot,
+        footer=f"Confirmed by a second check - {stamp()}",
     )
 
 
@@ -132,6 +182,11 @@ def maybe_health_alert(product: dict, entry: dict, result: detect.Result) -> boo
 
     minutes = int(bad_for // 60)
     alert = notify.Alert(
+        kind="health",
+        fields=[("Retailer", product["name"], True),
+                ("Status", result.status.value, True),
+                ("Unreadable for", f"{minutes} min", True),
+                ("Last reason", result.reason[:1000], False)],
         title=f"{ICON[result.status]} Monitor can't read {product['name']}",
         body=(
             f"{product['name']} has returned no usable answer for {minutes} minutes.\n\n"
@@ -155,34 +210,75 @@ def maybe_heartbeat(state: dict) -> None:
     """
     Once a day, report that the monitor is alive and what it currently sees.
 
-    Without this, "no alerts" is ambiguous: it could mean the item is still
-    unavailable, or it could mean the terminal got closed three days ago.
+    Without this, "no alerts" is ambiguous: it could mean the console is
+    still unavailable, or that the terminal was closed three days ago.
     """
     if not config.HEARTBEAT_ENABLED:
         return
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    now_local = datetime.now()
+    today = now_local.strftime("%Y-%m-%d")
     if state.get("last_heartbeat_date") == today:
         return
-    if datetime.now().hour < config.HEARTBEAT_HOUR:
+    # A bare "hour >= HEARTBEAT_HOUR" is true all evening, so restarting at
+    # 11pm fired the morning check-in immediately. Bound it to a window.
+    if not (config.HEARTBEAT_HOUR
+            <= now_local.hour
+            < config.HEARTBEAT_HOUR + config.HEARTBEAT_WINDOW_HOURS):
         return
 
-    lines = []
+    fields, degraded = [], 0
     for product in config.PRODUCTS:
         entry = state["products"].get(product["key"], {})
-        status = entry.get("status") or "unknown"
-        lines.append(f"{ICON.get(Status(status), '?') if status in {s.value for s in Status} else '?'} "
-                     f"{product['name']}: {status}")
+        reading = entry.get("last_reading") or "never checked"
+        known_good = entry.get("status")
+        icon = ICON.get(Status(reading), "?") if reading in {s.value for s in Status} else "?"
+
+        value = f"{icon} {reading}"
+        # Say so plainly when the displayed status is just the last thing we
+        # managed to read, rather than what the retailer says right now.
+        if reading in {s.value for s in detect.UNUSABLE}:
+            degraded += 1
+            if known_good and known_good != reading:
+                age = entry.get("last_good_ts")
+                ago = f", last read {int((now() - age) // 3600)}h ago" if age else ""
+                value += f"\n(last known: {known_good}{ago})"
+        fields.append((product["name"][:40], value, True))
+
+    summary = ("All retailers reading cleanly."
+               if not degraded else
+               f"{degraded} of {len(config.PRODUCTS)} retailers unreadable right now.")
 
     notify.send(
         notify.Alert(
-            title="\U0001f4a4 Zelda bot daily check-in",
-            body="Still running. Current readings:\n\n" + "\n".join(lines),
+            title="\U0001f4a4 Daily check-in",
+            body=f"Monitor is running. {summary}",
             urgent=False,
+            kind="heartbeat",
+            fields=fields,
+            footer=f"Next check-in tomorrow ~{config.HEARTBEAT_HOUR:02d}:00",
         )
     )
     state["last_heartbeat_date"] = today
     print("    daily heartbeat sent")
+
+
+def log_check(product: dict, result: detect.Result) -> None:
+    """Append every reading to a CSV so history is diagnosable after the fact."""
+    if not config.LOG_ENABLED:
+        return
+    try:
+        import csv
+
+        new = not os.path.exists(config.LOG_CSV)
+        with open(config.LOG_CSV, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            if new:
+                writer.writerow(["timestamp", "retailer", "status", "source", "price", "reason"])
+            writer.writerow([stamp(), product["key"], result.status.value,
+                             result.source, result.price or "", result.reason[:300]])
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +321,9 @@ def check_feeds(state: dict) -> None:
                       "go look now, it may already be gone."),
                 url=post["link"] or None,
                 urgent=True,
+                kind="feed",
+                fields=[("Account", f"@{post['account']}", True),
+                        ("Confidence", "Unverified social tip", True)],
             )
         )
         print(f"        sent: {results}")
@@ -241,11 +340,15 @@ def run_pass(state: dict, debug: bool = False) -> None:
         entry = entry_for(state, product["key"])
         result = detect.check(product)
         previous = entry["status"]
+        entry["last_reading"] = result.status.value
+        log_check(product, result)
 
         line = f"  {ICON[result.status]} {product['name']:<42} {result.status.value}"
         if result.price:
             line += f"  {result.price}"
         print(line)
+        if not debug and result.status in detect.UNUSABLE:
+            print(f"      why: {result.reason[:160]}")
         if debug:
             print(f"      source : {result.source}")
             print(f"      reason : {result.reason}")
@@ -269,6 +372,13 @@ def run_pass(state: dict, debug: bool = False) -> None:
             due = now() - entry["last_alert_ts"] >= config.REALERT_MINUTES * 60
             first_time = not was_alertable
 
+            if (first_time or (due and entry["alert_count"] < config.MAX_REALERTS)) \
+                    and not confirmed(product, result):
+                # Second look disagreed. Don't alert, and don't record it as
+                # buyable either -- leave the last known-good status intact
+                # so a real restock still reads as a fresh transition.
+                continue
+
             if first_time or (due and entry["alert_count"] < config.MAX_REALERTS):
                 entry["alert_count"] = 1 if first_time else entry["alert_count"] + 1
                 entry["last_alert_ts"] = now()
@@ -282,6 +392,7 @@ def run_pass(state: dict, debug: bool = False) -> None:
         if result.status.value != previous:
             entry["since"] = now()
         entry["status"] = result.status.value
+        entry["last_good_ts"] = now()
 
     check_feeds(state)
     maybe_heartbeat(state)
@@ -313,6 +424,44 @@ def cmd_test_alert() -> int:
     return 0 if ok else 1
 
 
+def cmd_probe(key: str) -> int:
+    """Dump the rendered buy box for one retailer, plus the verdict it produces."""
+    import json as _json
+
+    product = next((p for p in config.PRODUCTS if p["key"] == key), None)
+    if product is None:
+        print(f"Unknown retailer {key!r}. Options: {', '.join(p['key'] for p in config.PRODUCTS)}")
+        return 1
+
+    try:
+        import browser_detect
+    except ImportError:
+        print("Playwright isn't installed. Run:")
+        print("    python -m pip install -r requirements-browser.txt")
+        print("    python -m playwright install chromium")
+        return 1
+
+    print(f"Rendering {product['url']}\n")
+    probe = browser_detect.probe_page(product)
+    if probe is None:
+        print("Playwright unavailable.")
+        return 1
+
+    print("Buy-ish controls found:")
+    for button in probe.get("btns", []):
+        if browser_detect.BUY_TEXT.search(button["text"]) or browser_detect.BUY_TEXT.search(button["dt"]):
+            flag = "DISABLED" if button["disabled"] else "enabled "
+            print(f"  [{flag}] text={button['text']!r} data-test={button['dt']!r}")
+    print("\nFulfilment panel:")
+    for text in probe.get("fulfil", []):
+        print(f"  {text}")
+    print(f"\nFulfilment verdict: {browser_detect._fulfilment_verdict(' '.join(probe.get('fulfil', [])))}")
+    result = browser_detect._decide(probe)
+    print(f"\nVERDICT: {result.status.value}\nREASON : {result.reason}")
+    print(f"\nAll buttons (raw):\n{_json.dumps(probe.get('btns', []), indent=2)[:2500]}")
+    return 0
+
+
 def cmd_status() -> int:
     state = load_state()
     if not state["products"]:
@@ -337,12 +486,18 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true", help="explain every verdict")
     parser.add_argument("--test-alert", action="store_true", help="send a test notification and exit")
     parser.add_argument("--status", action="store_true", help="print current state and exit")
+    parser.add_argument("--probe", metavar="RETAILER",
+                        help="render one retailer and dump what the detector saw "
+                             "(e.g. --probe target). The tool to reach for when a "
+                             "verdict looks wrong.")
     args = parser.parse_args()
 
     if args.test_alert:
         return cmd_test_alert()
     if args.status:
         return cmd_status()
+    if args.probe:
+        return cmd_probe(args.probe)
 
     channels = notify.configured_channels()
     print(f"[{stamp()}] notification channels: {', '.join(channels) or 'NONE CONFIGURED'}")
