@@ -111,7 +111,12 @@ def fetch(url: str, timeout: int | None = None) -> tuple[str | None, int | None,
     timeout = timeout or config.REQUEST_TIMEOUT
     last_note = "no attempt made"
 
-    for attempt in range(1, config.MAX_RETRIES + 1):
+    # Best Buy stalls plain HTTP clients rather than refusing them, so three
+    # 20-second retries burned ~60s -- longer than the whole check interval.
+    # When a browser can rescue the check anyway, don't grind through them.
+    attempts = min(2, config.MAX_RETRIES) if config.USE_BROWSER else config.MAX_RETRIES
+
+    for attempt in range(1, attempts + 1):
         headers = dict(BASE_HEADERS)
         headers["User-Agent"] = random.choice(USER_AGENTS)
         try:
@@ -126,7 +131,7 @@ def fetch(url: str, timeout: int | None = None) -> tuple[str | None, int | None,
             else:
                 return resp.text.lower(), resp.status_code, "ok"
 
-        if attempt < config.MAX_RETRIES:
+        if attempt < attempts:
             time.sleep(min(2**attempt, 8) + random.uniform(0, 1.5))
 
     return None, None, last_note
@@ -255,21 +260,41 @@ def _jsonld(body: str) -> Result | None:
 # ---------------------------------------------------------------------------
 # Layer 3: embedded application state
 # ---------------------------------------------------------------------------
-_NEXT_DATA_RE = re.compile(r'<script id="__next_data__"[^>]*>(.*?)</script>', re.S | re.I)
-
-
 def _embedded_state(body: str) -> Result | None:
-    match = _NEXT_DATA_RE.search(body)
-    if not match:
-        return None
-    blob = match.group(1)
-    # Look for the unambiguous flags these storefronts expose.
-    if '"ispurchasable":true' in blob or '"purchasable":true' in blob:
-        return Result(Status.IN_STOCK, "embedded state: purchasable=true", "app-state")
-    if '"ispreorder":true' in blob or '"preorder":true' in blob:
-        return Result(Status.PREORDER, "embedded state: preorder=true", "app-state")
-    if '"ispurchasable":false' in blob or '"purchasable":false' in blob:
-        return Result(Status.OUT_OF_STOCK, "embedded state: purchasable=false", "app-state")
+    """
+    Read availability out of the embedded app state.
+
+    Walmart is the case that motivated this: its JSON-LD contains only
+    WebPage and BreadcrumbList (no Product offers), and it renders no
+    "Add to cart" button at all when an item is unavailable -- but its
+    __NEXT_DATA__ states the answer outright:
+
+        "availabilityStatus":"OUT_OF_STOCK"   (x8)
+        "isPreOrder":true
+
+    Searched across the whole body rather than only inside a __NEXT_DATA__
+    tag, because these blobs also arrive via other inline script shapes.
+    """
+    preorder = '"ispreorder":true' in body or '"is_pre_order":true' in body
+
+    # Explicit availability enum -- the strongest signal available here.
+    match = re.search(r'"availability_?status"\s*:\s*"([a-z_]+)"', body)
+    if match:
+        value = match.group(1)
+        if value in ("in_stock", "available"):
+            status = Status.PREORDER if preorder else Status.IN_STOCK
+            return Result(status, f'app state availabilityStatus="{value.upper()}"'
+                                  + (" with isPreOrder=true" if preorder else ""), "app-state")
+        if value in ("out_of_stock", "unavailable", "sold_out", "retired"):
+            return Result(Status.OUT_OF_STOCK,
+                          f'app state availabilityStatus="{value.upper()}"', "app-state")
+
+    # Boolean purchasable flags used by other storefronts.
+    if '"ispurchasable":true' in body or '"purchasable":true' in body:
+        status = Status.PREORDER if preorder else Status.IN_STOCK
+        return Result(status, "app state: purchasable=true", "app-state")
+    if '"ispurchasable":false' in body or '"purchasable":false' in body:
+        return Result(Status.OUT_OF_STOCK, "app state: purchasable=false", "app-state")
     return None
 
 
@@ -333,16 +358,18 @@ def _phrases(body: str) -> Result:
 # Entry points
 # ---------------------------------------------------------------------------
 def _browser_check(product: dict) -> Result | None:
+    """Returns whatever the browser concluded, including failures."""
     if not config.USE_BROWSER:
         return None
     try:
         import browser_detect
     except ImportError:
         return None
-    result = browser_detect.check(product)
-    if result is not None and result.status not in (Status.ERROR, Status.UNKNOWN):
-        return result
-    return None
+    return browser_detect.check(product)
+
+
+def _decisive(result: Result | None) -> bool:
+    return result is not None and result.status not in (Status.ERROR, Status.UNKNOWN)
 
 
 def check_product(product: dict) -> Result:
@@ -361,13 +388,21 @@ def check_product(product: dict) -> Result:
     # where a bare HTTP request does not, so it's worth one attempt.
     if body is None or any(marker in body for marker in BOT_WALL) or len(body) < 5000:
         rendered = _browser_check(product)
-        if rendered is not None:
+        if _decisive(rendered):
             return rendered
-        if body is None:
-            return Result(Status.BLOCKED if "bot protection" in note else Status.ERROR, note, "fetch")
-        reason = ("anti-bot interstitial served instead of the page"
-                  if len(body) >= 5000 else f"suspiciously small response ({len(body)} bytes)")
-        return Result(Status.BLOCKED, reason, "fetch", http_status=http_status, body_len=len(body))
+
+        # Both paths failed. Report both reasons -- knowing HTTP timed out
+        # AND the browser was blocked is a different problem from either
+        # alone, and the old code threw the browser's half away.
+        http_reason = (note if body is None else
+                       "anti-bot interstitial served instead of the page"
+                       if len(body) >= 5000 else f"tiny response ({len(body)} bytes)")
+        if rendered is not None:
+            combined = f"http: {http_reason} | browser: {rendered.reason}"
+            status = rendered.status if rendered.status is Status.BLOCKED else Status.ERROR
+            return Result(status, combined, "fetch+browser", http_status=http_status)
+        status = Status.BLOCKED if (body is not None or "bot protection" in note) else Status.ERROR
+        return Result(status, http_reason, "fetch", http_status=http_status)
 
     # Structured signals in the fetched HTML are cheapest and most reliable
     # -- GameStop, for instance, ships schema.org availability in its raw
@@ -380,7 +415,7 @@ def check_product(product: dict) -> Result:
 
     # Nothing structured in the HTML (Target). Render it properly.
     rendered = _browser_check(product)
-    if rendered is not None:
+    if _decisive(rendered):
         return rendered
 
     result = _phrases(body)

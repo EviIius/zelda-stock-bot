@@ -442,10 +442,27 @@ def cmd_probe(key: str) -> int:
         return 1
 
     print(f"Rendering {product['url']}\n")
-    probe = browser_detect.probe_page(product)
+    try:
+        probe = browser_detect.probe_page(product)
+    except Exception as exc:  # noqa: BLE001 - a debugging tool must not traceback
+        print(f"Render failed: {type(exc).__name__}")
+        print(f"  {str(exc).splitlines()[0][:300]}")
+        return 1
     if probe is None:
         print("Playwright unavailable.")
         return 1
+
+    print(f"browser      : {probe.get('_browser')}")
+    print(f"page title   : {probe.get('_title')!r}")
+    print(f"final url    : {probe.get('_final_url')}")
+    print(f"body text    : {probe.get('_body_len', 0)} chars")
+    print(f"blocked      : {probe.get('_blocked')}")
+    if probe.get("_nav_error"):
+        print(f"nav error    : {probe['_nav_error']}")
+    if not probe.get("btns"):
+        # The most useful thing when a page yields nothing at all.
+        print(f"\nPage text (first 600 chars):\n  {probe.get('_body', '')[:600]!r}")
+    print()
 
     print("Buy-ish controls found:")
     for button in probe.get("btns", []):

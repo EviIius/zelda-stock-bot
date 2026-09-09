@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 
 import config
+import detect
 from detect import Result, Status
 
 BUY_TEXT = re.compile(r"add to cart|add for shipping|pre-?order|buy now|ship it|add to bag", re.I)
@@ -154,49 +155,115 @@ def _decide(probe: dict) -> Result:
     return Result(Status.UNKNOWN, "rendered page exposed no recognisable buy control", "browser")
 
 
+STEALTH = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || {runtime: {}};
+"""
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _launch(pw):
+    """
+    Prefer the real Chrome install over Playwright's bundled Chromium.
+
+    Walmart's bot detection fingerprints the bundled build and serves an
+    interstitial to it. Real Chrome, driven the same way, usually passes.
+    Falls back to Chromium when Chrome isn't installed.
+    """
+    # --disable-http2: Best Buy's edge terminates Chromium's HTTP/2 handshake
+    # with ERR_HTTP2_PROTOCOL_ERROR. Forcing HTTP/1.1 gets the page. It is
+    # almost certainly the same fault that makes plain `requests` hang until
+    # it times out rather than returning an error.
+    args = ["--disable-blink-features=AutomationControlled", "--no-sandbox",
+            "--disable-dev-shm-usage", "--disable-http2"]
+    try:
+        return pw.chromium.launch(headless=True, channel="chrome", args=args), "chrome"
+    except Exception:  # noqa: BLE001
+        return pw.chromium.launch(headless=True, args=args), "chromium"
+
+
+def _context(browser):
+    context = browser.new_context(
+        user_agent=UA,
+        viewport={"width": 1440, "height": 900},
+        locale="en-US",
+        timezone_id="America/New_York",
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+    )
+    context.add_init_script(STEALTH)
+    return context
+
+
+def _settle(page):
+    from playwright.sync_api import TimeoutError as PWTimeout
+
+    for selector in ('[data-test*="fulfillment"]', '[data-test*="add-to-cart"]',
+                     'button:has-text("Add to cart")', 'button:has-text("Pre-order")'):
+        try:
+            page.wait_for_selector(selector, timeout=6000)
+            break
+        except PWTimeout:
+            continue
+    page.wait_for_timeout(1500)
+
+
+BLOCK_MARKERS = ("pardon our interruption", "are you a human", "verify you are a human",
+                 "unusual traffic", "access denied", "robot or human",
+                 "activity on this site has been disabled", "verify your identity",
+                 "please verify", "px-captcha", "checking your browser",
+                 "enable javascript and cookies")
+
+
 def probe_page(product: dict) -> dict | None:
     """Render the page and return the raw probe. Used by --probe for debugging."""
     try:
-        from playwright.sync_api import TimeoutError as PWTimeout
         from playwright.sync_api import sync_playwright
     except ImportError:
         return None
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
+        browser, flavour = _launch(pw)
         try:
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1440, "height": 900},
-                locale="en-US",
-            )
-            page = context.new_page()
-            page.goto(product["url"], wait_until="domcontentloaded",
-                      timeout=config.BROWSER_TIMEOUT_MS)
+            page = _context(browser).new_page()
 
-            # Wait for the buy box specifically, not just the network. The
-            # fulfilment module hydrates after first paint, and reading too
-            # early sees a control that has not been disabled yet.
-            for selector in ('[data-test*="fulfillment"]', '[data-test*="add-to-cart"]',
-                             'button:has-text("Add to cart")', 'button:has-text("Pre-order")'):
+            nav_error = None
+            for wait_until in ("domcontentloaded", "load", "commit"):
                 try:
-                    page.wait_for_selector(selector, timeout=6000)
+                    page.goto(product["url"], wait_until=wait_until,
+                              timeout=config.BROWSER_TIMEOUT_MS)
+                    nav_error = None
                     break
-                except PWTimeout:
-                    continue
-            page.wait_for_timeout(1500)  # let hydration settle
+                except Exception as exc:  # noqa: BLE001
+                    nav_error = f"{type(exc).__name__}: {str(exc).splitlines()[0][:150]}"
+            _settle(page)
 
-            body = (page.inner_text("body") or "").lower()
-            probe = page.evaluate(PROBE)
-            probe["_blocked"] = any(m in body for m in (
-                "pardon our interruption", "are you a human",
-                "verify you are a human", "unusual traffic", "access denied"))
+            try:
+                body = (page.inner_text("body") or "").lower()
+            except Exception:  # noqa: BLE001
+                body = ""
+            try:
+                probe = page.evaluate(PROBE)
+            except Exception:  # noqa: BLE001
+                probe = {"btns": [], "fulfil": []}
+
+            probe["_blocked"] = any(m in body for m in BLOCK_MARKERS)
+            probe["_browser"] = flavour
+            probe["_body"] = body
+            # Everything below is for --probe: when a page yields nothing,
+            # these are what tell you whether it was a challenge page, a
+            # redirect, or simply an empty shell that never hydrated.
+            try:
+                probe["_html"] = page.content().lower()
+            except Exception:  # noqa: BLE001
+                probe["_html"] = ""
+            probe["_title"] = page.title()
+            probe["_final_url"] = page.url
+            probe["_nav_error"] = nav_error
+            probe["_body_len"] = len(body)
             return probe
         finally:
             browser.close()
@@ -211,23 +278,18 @@ def capture_buybox(product: dict) -> bytes | None:
     verdict. Best effort -- never let a screenshot failure block an alert.
     """
     try:
-        from playwright.sync_api import TimeoutError as PWTimeout
         from playwright.sync_api import sync_playwright
     except ImportError:
         return None
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser, _ = _launch(pw)
             try:
-                page = browser.new_context(viewport={"width": 1280, "height": 900}).new_page()
+                page = _context(browser).new_page()
                 page.goto(product["url"], wait_until="domcontentloaded",
                           timeout=config.BROWSER_TIMEOUT_MS)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=8000)
-                except PWTimeout:
-                    pass
-                page.wait_for_timeout(1200)
+                _settle(page)
                 for selector in ('[data-test*="fulfillment"]', '[data-test*="add-to-cart"]',
                                  '[data-test*="AddToCart"]', "main"):
                     try:
@@ -244,8 +306,6 @@ def capture_buybox(product: dict) -> bytes | None:
 
 
 def check(product: dict) -> Result | None:
-    if product.get("kind") == "appears":
-        return None  # listing-page watching is fine over plain HTTP
     try:
         probe = probe_page(product)
     except Exception as exc:  # noqa: BLE001
@@ -253,5 +313,29 @@ def check(product: dict) -> Result | None:
     if probe is None:
         return None
     if probe.get("_blocked"):
-        return Result(Status.BLOCKED, "anti-bot interstitial in rendered page", "browser")
+        return Result(Status.BLOCKED,
+                      f"anti-bot interstitial in rendered page ({probe.get('_browser')})", "browser")
+
+    # Listing-page watching ("has the edition appeared at all?") also works
+    # here, and matters because Costco returns 403 to plain HTTP.
+    if product.get("kind") == "appears":
+        phrase = product["phrase"].lower()
+        if phrase in probe.get("_body", ""):
+            return Result(Status.IN_STOCK,
+                          f"phrase {phrase!r} appeared on the rendered listing page", "browser")
+        return Result(Status.OUT_OF_STOCK,
+                      f"phrase {phrase!r} not on the rendered listing page yet", "browser")
+
+    # Structured data in the RENDERED html beats any DOM heuristic, and is
+    # the only thing that answers Walmart -- it ships no Product JSON-LD and
+    # renders no cart button at all when unavailable, but its app state says
+    # "availabilityStatus":"OUT_OF_STOCK" plainly.
+    html = probe.get("_html") or ""
+    if html:
+        for layer in (detect._jsonld, detect._embedded_state):
+            structured = layer(html)
+            if structured is not None:
+                structured.source = "browser+" + structured.source
+                return structured
+
     return _decide(probe)

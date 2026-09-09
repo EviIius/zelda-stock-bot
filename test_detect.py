@@ -96,6 +96,27 @@ CASES: list[tuple[str, str, Status]] = [
         Status.BLOCKED,
     ),
     (
+        "WALMART: app state availabilityStatus=OUT_OF_STOCK (no Product JSON-LD, "
+        "no cart button) -> out of stock",
+        "<html><body><h1>Zelda Switch 2</h1><button>Add to list</button>"
+        '<script>{"availabilityStatus":"OUT_OF_STOCK","isPreOrder":true}</script>'
+        + FILLER + "</body></html>",
+        Status.OUT_OF_STOCK,
+    ),
+    (
+        "WALMART: availabilityStatus=IN_STOCK + isPreOrder -> preorder (alertable)",
+        "<html><body><h1>Zelda Switch 2</h1>"
+        '<script>{"availabilityStatus":"IN_STOCK","isPreOrder":true}</script>'
+        + FILLER + "</body></html>",
+        Status.PREORDER,
+    ),
+    (
+        "availabilityStatus=IN_STOCK without preorder flag -> in stock",
+        "<html><body><h1>Zelda Switch 2</h1>"
+        '<script>{"availabilityStatus":"IN_STOCK"}</script>' + FILLER + "</body></html>",
+        Status.IN_STOCK,
+    ),
+    (
         "embedded app state purchasable=false",
         '<html><head></head><body><script id="__NEXT_DATA__">{"props":{"ispurchasable":false}}</script>'
         + FILLER + "</body></html>",
