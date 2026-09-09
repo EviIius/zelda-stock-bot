@@ -1,195 +1,341 @@
 """
 Stock monitor for the Zelda 40th Anniversary Nintendo Switch 2.
 
-Checks Target, Walmart, Best Buy, and the Nintendo Store for in-stock
-status, and watches Costco's Switch 2 listing page in case they start
-carrying this edition at all. Texts you (via your carrier's free
-email-to-SMS gateway) the moment something changes in your favor.
-Designed to be run on a schedule by GitHub Actions (see
-.github/workflows/stock-monitor.yml), but you can also run it manually
-with `python stock_monitor.py`.
+Watches Target, Walmart, Best Buy and the Nintendo Store for the console
+becoming buyable -- in stock *or* a pre-order window reopening -- and
+pushes an alert to every notification channel you've configured. Also
+watches Costco's Switch 2 listing in case they start carrying the edition
+at all.
 
-State is kept in stock_state.json so you only get a text on the
-*transition*, not every single check.
+Usage
+-----
+  python stock_monitor.py                 one pass, then exit (good for cron)
+  python stock_monitor.py --loop          check continuously until stopped
+  python stock_monitor.py --loop --duration 3300
+                                          loop for 55 minutes, then exit
+  python stock_monitor.py --debug         one pass, showing how each verdict
+                                          was reached (start here when
+                                          something looks wrong)
+  python stock_monitor.py --test-alert    prove your notifications work
+  python stock_monitor.py --status        print what the bot currently thinks
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
-import smtplib
-from email.mime.text import MIMEText
+import random
+import sys
+import time
+from datetime import datetime, timezone
 
-import requests
+import config
+import detect
+import feeds
+import notify
+from detect import Status
 
-# ---------------------------------------------------------------------------
-# Products to watch. Add/remove entries here.
-#
-#   type "stock"   -> dedicated product page; alerts when it flips from
-#                      out-of-stock to in-stock (Target, Walmart, Best Buy,
-#                      Nintendo Store).
-#   type "appears" -> no dedicated product page exists yet; alerts the
-#                      first time a distinctive phrase shows up on a
-#                      listing/category page (Costco, until they have an
-#                      actual product page for this edition).
-# ---------------------------------------------------------------------------
-PRODUCTS = {
-    "Target - Zelda Switch 2": {
-        "type": "stock",
-        "url": "https://www.target.com/p/-/A-1013322047",
-    },
-    "Walmart - Zelda Switch 2": {
-        "type": "stock",
-        "url": "https://www.walmart.com/ip/Nintendo-Switch-2-The-Legend-of-Zelda-40th-Anniversary-Edition/21002656445",
-    },
-    "Best Buy - Zelda Switch 2": {
-        "type": "stock",
-        "url": "https://www.bestbuy.com/product/switch-2-the-legend-of-zelda-40th-anniversary-edition/J7GSL57HTY",
-    },
-    "Nintendo Store - Zelda Switch 2": {
-        "type": "stock",
-        "url": "https://www.nintendo.com/us/store/products/nintendo-switch-2-the-legend-of-zelda-40th-anniversary-edition-121642/",
-    },
-    "Costco - Switch 2 listing (watching for Zelda edition)": {
-        "type": "appears",
-        "url": "https://www.costco.com/nintendo-switch-2.html",
-        "phrase": "40th anniversary",
-    },
+STATE_VERSION = 2
+
+ICON = {
+    Status.IN_STOCK: "\U0001f7e2",
+    Status.PREORDER: "\U0001f7e1",
+    Status.OUT_OF_STOCK: "⚪",
+    Status.BLOCKED: "\U0001f6ab",
+    Status.ERROR: "\U0001f534",
+    Status.UNKNOWN: "❓",
 }
 
-# Phrases that mean "not buyable" if found in the page.
-OUT_OF_STOCK_PHRASES = [
-    "out of stock",
-    "sold out",
-    "currently unavailable",
-    "coming soon",
-    "notify me when available",
-]
 
-# Phrases that suggest it IS buyable (used as a positive signal).
-IN_STOCK_PHRASES = [
-    "add to cart",
-    "ship it",
-]
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-STATE_FILE = os.path.join(os.path.dirname(__file__), "stock_state.json")
+def now() -> float:
+    return time.time()
 
 
+def stamp() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
 def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {}
+    if not os.path.exists(config.STATE_FILE):
+        return {"version": STATE_VERSION, "products": {}}
+    try:
+        with open(config.STATE_FILE) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {"version": STATE_VERSION, "products": {}}
+    if data.get("version") != STATE_VERSION:
+        # Old flat {name: bool} format -- start clean rather than
+        # misinterpreting it.
+        return {"version": STATE_VERSION, "products": {}}
+    return data
 
 
 def save_state(state: dict) -> None:
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    tmp = config.STATE_FILE + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(state, handle, indent=2)
+    os.replace(tmp, config.STATE_FILE)  # atomic; never leaves a half-written file
 
 
-def fetch(url: str) -> str | None:
+def entry_for(state: dict, key: str) -> dict:
+    return state["products"].setdefault(
+        key,
+        {
+            "status": None,
+            "since": None,
+            "last_alert_ts": 0.0,
+            "alert_count": 0,
+            "bad_since": None,
+            "last_health_alert_ts": 0.0,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+def build_alert(product: dict, result: detect.Result, repeat: int) -> notify.Alert:
+    headline = "IN STOCK" if result.status is Status.IN_STOCK else "PRE-ORDER OPEN"
+    if product.get("kind") == "appears":
+        headline = "SHOWED UP"
+
+    title = f"{ICON[result.status]} {headline} - {product['name']} - Zelda Switch 2"
+    if repeat > 1:
+        title += f" (reminder {repeat})"
+
+    lines = [f"**{product['name']}** - {headline}", "", result.reason, "", product["url"]]
+    if product.get("cart_url"):
+        lines += ["", f"Straight to cart: {product['cart_url']}"]
+    lines += ["", f"Detected {stamp()} via {result.source}"]
+
+    return notify.Alert(
+        title=title,
+        body="\n".join(lines),
+        url=product["url"],
+        cart_url=product.get("cart_url"),
+        price=result.price,
+        urgent=True,
+    )
+
+
+def maybe_health_alert(product: dict, entry: dict, result: detect.Result) -> bool:
+    """Warn once if a retailer has been unreadable long enough to matter."""
+    bad_for = now() - (entry["bad_since"] or now())
+    if bad_for < config.HEALTH_ALERT_AFTER_MINUTES * 60:
+        return False
+    if now() - entry["last_health_alert_ts"] < config.HEALTH_ALERT_COOLDOWN_MINUTES * 60:
+        return False
+
+    minutes = int(bad_for // 60)
+    alert = notify.Alert(
+        title=f"{ICON[result.status]} Monitor can't read {product['name']}",
+        body=(
+            f"{product['name']} has returned no usable answer for {minutes} minutes.\n\n"
+            f"Last result: {result.status.value} - {result.reason}\n\n"
+            "This is a heads-up that the check is degraded, not that the item is "
+            "unavailable. Nothing has been missed yet, but this retailer isn't "
+            "currently being watched reliably."
+        ),
+        url=product["url"],
+        urgent=False,
+    )
+    results = notify.send(alert)
+    print(f"    health alert sent: {results}")
+    entry["last_health_alert_ts"] = now()
+    return True
+
+
+
+# ---------------------------------------------------------------------------
+# Social feeds (@Wario64 / @IGNDeals)
+# ---------------------------------------------------------------------------
+def check_feeds(state: dict) -> None:
+    """
+    Poll the watched accounts and forward anything that matches.
+
+    Deliberately quiet about its own failures: the mirrors this depends on
+    go down routinely, and a bonus signal shouldn't generate noise or
+    imply the retailer checks are broken.
+    """
+    if not config.ENABLE_FEED_WATCH:
+        return
+
+    bucket = state.setdefault("feeds", {"seen": [], "last_check": 0.0})
+    if now() - bucket.get("last_check", 0.0) < config.FEED_INTERVAL_MINUTES * 60:
+        return
+    bucket["last_check"] = now()
+
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        return resp.text.lower()
-    except requests.RequestException as e:
-        print(f"  [warn] request failed for {url}: {e}")
-        return None
+        posts, seen = feeds.poll(bucket.get("seen", []))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  \U0001f4f0 feed watch unavailable ({type(exc).__name__}) - ignoring")
+        return
+
+    bucket["seen"] = seen
+    if not posts:
+        print(f"  \U0001f4f0 feeds: nothing new matching Zelda Switch 2")
+        return
+
+    for post in posts:
+        print(f"    >>> FEED HIT from @{post['account']}: {post['text'][:80]}")
+        results = notify.send(
+            notify.Alert(
+                title=f"\U0001f4f0 @{post['account']} posted about the Zelda Switch 2",
+                body=(f"{post['text']}\n\n{post['link']}\n\n"
+                      "This is a social-feed tip, not a confirmed stock check - "
+                      "go look now, it may already be gone."),
+                url=post["link"] or None,
+                urgent=True,
+            )
+        )
+        print(f"        sent: {results}")
 
 
-def check_stock(url: str) -> bool | None:
-    """Returns True (in stock), False (out of stock), or None (couldn't tell)."""
-    text = fetch(url)
-    if text is None:
-        return None
+# ---------------------------------------------------------------------------
+# One pass
+# ---------------------------------------------------------------------------
+def run_pass(state: dict, debug: bool = False) -> None:
+    for index, product in enumerate(config.PRODUCTS):
+        if index and config.STAGGER:
+            time.sleep(config.STAGGER + random.uniform(0, 2))
 
-    for phrase in OUT_OF_STOCK_PHRASES:
-        if phrase in text:
-            return False
+        entry = entry_for(state, product["key"])
+        result = detect.check(product)
+        previous = entry["status"]
 
-    for phrase in IN_STOCK_PHRASES:
-        if phrase in text:
-            return True
+        line = f"  {ICON[result.status]} {product['name']:<42} {result.status.value}"
+        if result.price:
+            line += f"  {result.price}"
+        print(line)
+        if debug:
+            print(f"      source : {result.source}")
+            print(f"      reason : {result.reason}")
+            print(f"      http   : {result.http_status}   body: {result.body_len} bytes")
+            print(f"      last   : {previous}")
 
-    # Neither signal found (page structure changed, JS-rendered content,
-    # bot-detection page returned instead of the real page, etc.)
-    return None
+        # --- health tracking -------------------------------------------
+        if result.status in detect.UNUSABLE:
+            if entry["bad_since"] is None:
+                entry["bad_since"] = now()
+            maybe_health_alert(product, entry, result)
+            # Deliberately do NOT overwrite the last known-good status: a
+            # transient block must not erase what we knew.
+            continue
+
+        entry["bad_since"] = None
+
+        # --- alerting ---------------------------------------------------
+        if result.alertable:
+            was_alertable = previous in {s.value for s in detect.ALERTABLE}
+            due = now() - entry["last_alert_ts"] >= config.REALERT_MINUTES * 60
+            first_time = not was_alertable
+
+            if first_time or (due and entry["alert_count"] < config.MAX_REALERTS):
+                entry["alert_count"] = 1 if first_time else entry["alert_count"] + 1
+                entry["last_alert_ts"] = now()
+                alert = build_alert(product, result, entry["alert_count"])
+                results = notify.send(alert)
+                print(f"    >>> ALERT SENT: {results}")
+        elif previous in {s.value for s in detect.ALERTABLE}:
+            print("    (was buyable, now gone -- resetting alert counter)")
+            entry["alert_count"] = 0
+
+        if result.status.value != previous:
+            entry["since"] = now()
+        entry["status"] = result.status.value
+
+    check_feeds(state)
+    save_state(state)
 
 
-def check_appears(url: str, phrase: str) -> bool | None:
-    """Returns True if `phrase` is found on the page, False if not, None on error."""
-    text = fetch(url)
-    if text is None:
-        return None
-    return phrase.lower() in text
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def cmd_test_alert() -> int:
+    channels = notify.configured_channels()
+    if not channels:
+        print("No notification channels configured. Set DISCORD_WEBHOOK_URL "
+              "(and optionally PUSHOVER_TOKEN / PUSHOVER_USER) and try again.")
+        return 1
+    print(f"Configured channels: {', '.join(channels)}")
+    results = notify.send(
+        notify.Alert(
+            title="✅ Zelda stock bot - test alert",
+            body=("If you're reading this on your phone, the alert path works.\n\n"
+                  "This is only a test - nothing is actually in stock."),
+            url="https://www.nintendo.com/us/store/products/nintendo-switch-2-the-legend-of-zelda-40th-anniversary-edition-121642/",
+            urgent=False,
+        )
+    )
+    ok = all(value == "ok" for value in results.values())
+    for name, value in results.items():
+        print(f"  {name}: {value}")
+    return 0 if ok else 1
 
 
-def send_sms_via_email_gateway(message: str) -> None:
-    """
-    Free SMS via carrier email-to-text gateway. Requires these env vars:
-      SMS_TO_NUMBER        e.g. "5551234567" (10 digits, no dashes)
-      SMS_CARRIER_GATEWAY  e.g. "vtext.com" (see README for your carrier)
-      GMAIL_USER           the Gmail address sending the alert
-      GMAIL_APP_PASSWORD   a Gmail App Password (not your normal password)
-    """
-    to_number = os.environ["SMS_TO_NUMBER"]
-    carrier_gateway = os.environ["SMS_CARRIER_GATEWAY"]
-    gmail_user = os.environ["GMAIL_USER"]
-    gmail_app_password = os.environ["GMAIL_APP_PASSWORD"]
-
-    to_addr = f"{to_number}@{carrier_gateway}"
-
-    msg = MIMEText(message)
-    msg["From"] = gmail_user
-    msg["To"] = to_addr
-    msg["Subject"] = ""
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_user, gmail_app_password)
-        server.sendmail(gmail_user, [to_addr], msg.as_string())
-
-
-def main() -> None:
+def cmd_status() -> int:
     state = load_state()
-    changed = False
+    if not state["products"]:
+        print("No state recorded yet - run a check first.")
+        return 0
+    for product in config.PRODUCTS:
+        entry = state["products"].get(product["key"])
+        if not entry:
+            continue
+        age = f"{int((now() - entry['since']) // 60)}m ago" if entry.get("since") else "?"
+        print(f"  {product['name']:<42} {entry['status'] or 'unknown':<14} since {age}")
+    return 0
 
-    for name, cfg in PRODUCTS.items():
-        url = cfg["url"]
 
-        if cfg["type"] == "stock":
-            result = check_stock(url)
-            label = "IN STOCK" if result else "out of stock" if result is False else "unknown"
-        else:  # "appears"
-            result = check_appears(url, cfg["phrase"])
-            label = "PHRASE FOUND" if result else "not found yet" if result is False else "unknown"
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--loop", action="store_true", help="keep checking until stopped")
+    parser.add_argument("--duration", type=int, default=0,
+                        help="with --loop, stop after this many seconds (0 = forever)")
+    parser.add_argument("--interval", type=int, default=config.CHECK_INTERVAL,
+                        help="seconds between passes when looping")
+    parser.add_argument("--debug", action="store_true", help="explain every verdict")
+    parser.add_argument("--test-alert", action="store_true", help="send a test notification and exit")
+    parser.add_argument("--status", action="store_true", help="print current state and exit")
+    args = parser.parse_args()
 
-        print(f"{name}: {label}")
+    if args.test_alert:
+        return cmd_test_alert()
+    if args.status:
+        return cmd_status()
 
-        was_true = state.get(name, False)
-        if result is True and not was_true:
-            message = f"UPDATE: {name}\n{url}"
-            print(f"  -> sending alert: {message}")
-            try:
-                send_sms_via_email_gateway(message)
-            except Exception as e:
-                print(f"  [error] failed to send SMS: {e}")
+    channels = notify.configured_channels()
+    print(f"[{stamp()}] notification channels: {', '.join(channels) or 'NONE CONFIGURED'}")
+    if not channels:
+        print("  !! Nothing will reach you. Set DISCORD_WEBHOOK_URL at minimum.")
 
-        # Only update state on a clear reading, so a temporary "unknown"
-        # (site hiccup, bot-detection page, etc.) doesn't erase what we
-        # last knew.
-        if result is not None:
-            state[name] = result
-            changed = True
+    state = load_state()
 
-    if changed:
-        save_state(state)
+    if not args.loop:
+        run_pass(state, debug=args.debug)
+        return 0
+
+    deadline = now() + args.duration if args.duration else None
+    passes = 0
+    try:
+        while True:
+            passes += 1
+            print(f"[{stamp()}] pass {passes}")
+            run_pass(state, debug=args.debug)
+
+            wait = args.interval + random.uniform(0, config.JITTER)
+            if deadline and now() + wait > deadline:
+                print(f"[{stamp()}] duration reached after {passes} passes")
+                return 0
+            time.sleep(wait)
+    except KeyboardInterrupt:
+        print(f"\n[{stamp()}] stopped after {passes} passes")
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

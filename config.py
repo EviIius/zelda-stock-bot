@@ -1,0 +1,123 @@
+"""
+Products, tunables and channel configuration.
+
+Everything you'd realistically want to tweak lives in this file or in
+environment variables. Nothing here is secret -- secrets come from env.
+"""
+
+from __future__ import annotations
+
+import os
+
+
+def _int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+# ---------------------------------------------------------------------------
+# What we're watching.
+#
+#   kind "product" -> a real product page; alert when it becomes buyable
+#                     (in stock OR pre-order window open).
+#   kind "appears" -> no product page exists yet; alert the first time a
+#                     distinctive phrase shows up on a listing page.
+#
+# Optional per-product keys:
+#   sku       Best Buy SKU -> enables the official Best Buy API (most reliable)
+#   tcin      Target item number -> used for the RedSky API when a key is set
+#   item_id   Walmart item id -> used to build an add-to-cart link
+#   cart_url  Tap-once "put it in my cart" link included in the alert
+# ---------------------------------------------------------------------------
+PRODUCTS = [
+    {
+        "key": "target",
+        "name": "Target",
+        "url": "https://www.target.com/p/-/A-1013322047",
+        "kind": "product",
+        "tcin": "1013322047",
+        "cart_url": None,  # Target has no public add-to-cart URL
+    },
+    {
+        "key": "walmart",
+        "name": "Walmart",
+        "url": "https://www.walmart.com/ip/Nintendo-Switch-2-The-Legend-of-Zelda-40th-Anniversary-Edition/21002656445",
+        "kind": "product",
+        "item_id": "21002656445",
+        "cart_url": "https://affil.walmart.com/cart/addToCart?items=21002656445",
+    },
+    {
+        "key": "bestbuy",
+        "name": "Best Buy",
+        "url": "https://www.bestbuy.com/product/switch-2-the-legend-of-zelda-40th-anniversary-edition/J7GSL57HTY",
+        "kind": "product",
+        "sku": "6691841",
+        "cart_url": "https://api.bestbuy.com/click/-/6691841/cart",
+    },
+    {
+        "key": "nintendo",
+        "name": "Nintendo Store",
+        "url": "https://www.nintendo.com/us/store/products/nintendo-switch-2-the-legend-of-zelda-40th-anniversary-edition-121642/",
+        "kind": "product",
+        "cart_url": None,
+    },
+    {
+        "key": "costco",
+        "name": "Costco (watching for the edition to appear)",
+        "url": "https://www.costco.com/nintendo-switch-2.html",
+        "kind": "appears",
+        "phrase": "40th anniversary",
+        "cart_url": None,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------------
+# Seconds between full check passes when running with --loop.
+CHECK_INTERVAL = _int("CHECK_INTERVAL", 60)
+# Random 0..JITTER seconds added to each interval, so requests don't arrive
+# on a perfectly predictable cadence (which is itself a bot signal).
+JITTER = _int("JITTER", 20)
+# Seconds to pause between individual retailers within one pass.
+STAGGER = _int("STAGGER", 3)
+
+REQUEST_TIMEOUT = _int("REQUEST_TIMEOUT", 20)
+MAX_RETRIES = _int("MAX_RETRIES", 3)
+
+# ---------------------------------------------------------------------------
+# Alert policy
+# ---------------------------------------------------------------------------
+# Keep re-alerting while an item stays buyable -- one missed notification
+# shouldn't cost you the console.
+REALERT_MINUTES = _int("REALERT_MINUTES", 20)
+MAX_REALERTS = _int("MAX_REALERTS", 6)
+
+# If a retailer returns nothing usable (blocked / error / unknown) for this
+# long, send a quiet heads-up. This is what stops the bot from being silently
+# broken for a week while you assume it's just "not in stock yet".
+HEALTH_ALERT_AFTER_MINUTES = _int("HEALTH_ALERT_AFTER_MINUTES", 90)
+HEALTH_ALERT_COOLDOWN_MINUTES = _int("HEALTH_ALERT_COOLDOWN_MINUTES", 360)
+
+# ---------------------------------------------------------------------------
+# Social feed watching (@Wario64 etc). Best-effort -- see feeds.py.
+# ---------------------------------------------------------------------------
+ENABLE_FEED_WATCH = (os.environ.get("ENABLE_FEED_WATCH", "1").strip().lower()
+                     not in ("0", "false", "no", ""))
+# Feed mirrors rate-limit aggressively, so poll them far less often than
+# the retailers themselves.
+FEED_INTERVAL_MINUTES = _int("FEED_INTERVAL_MINUTES", 5)
+
+STATE_FILE = os.environ.get(
+    "STATE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock_state.json")
+)
+
+# ---------------------------------------------------------------------------
+# Optional API keys (set as env vars / GitHub secrets). Each one upgrades a
+# retailer from "scrape the HTML and hope" to a real structured answer.
+# ---------------------------------------------------------------------------
+BESTBUY_API_KEY = os.environ.get("BESTBUY_API_KEY", "").strip()
+TARGET_API_KEY = os.environ.get("TARGET_API_KEY", "").strip()

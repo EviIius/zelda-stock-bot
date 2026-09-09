@@ -1,40 +1,71 @@
 name: Stock Monitor
 
 on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds to keep looping before the job exits"
+        default: "3300"
+      interval:
+        description: "Seconds between checks"
+        default: "60"
   schedule:
-    # Runs every 5 minutes. GitHub may delay this by a few minutes during
-    # high load — it's a "best effort" scheduler, not exact.
+    # Safety net. GitHub's scheduler is best-effort and routinely runs late,
+    # so this is not "a check every 5 minutes" -- it's "restart the long
+    # loop promptly if it ever stops". The loop below is what actually
+    # gives you frequent checks.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
 
-permissions:
-  contents: write   # needed so the workflow can commit the updated state file
+# One monitor at a time. A tick that arrives while a loop is still running
+# queues instead of duplicating, and starts the moment the current one
+# ends -- which is what makes coverage continuous.
+concurrency:
+  group: stock-monitor
+  cancel-in-progress: false
 
 jobs:
-  check-stock:
+  monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Run stock check
+      # State lives in the Actions cache rather than in git, so the repo
+      # doesn't accumulate a commit every hour and two overlapping runs
+      # can't fight over the same file.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: stock_state.json
+          key: stock-state-${{ github.run_id }}
+          restore-keys: stock-state-
+
+      - name: Monitor
         env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+          BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}
+          TARGET_API_KEY: ${{ secrets.TARGET_API_KEY }}
           SMS_TO_NUMBER: ${{ secrets.SMS_TO_NUMBER }}
           SMS_CARRIER_GATEWAY: ${{ secrets.SMS_CARRIER_GATEWAY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: python stock_monitor.py
-
-      - name: Commit updated state file
         run: |
-          git config user.name "stock-bot"
-          git config user.email "stock-bot@users.noreply.github.com"
-          git add stock_state.json
-          git diff --staged --quiet || git commit -m "update stock state [skip ci]"
-          git push
+          python stock_monitor.py --loop \
+            --duration "${{ github.event.inputs.duration || '3300' }}" \
+            --interval "${{ github.event.inputs.interval || '60' }}"
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: stock_state.json
+          key: stock-state-${{ github.run_id }}
