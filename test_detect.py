@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import sys
 
-import detect
-from detect import Status
+import config
+
+config.USE_BROWSER = False  # exercise the HTTP layers deterministically
+
+import browser_detect  # noqa: E402
+import detect  # noqa: E402
+from detect import Status  # noqa: E402
 
 FILLER = "<p>lorem ipsum product details specifications reviews shipping</p>" * 200
 
@@ -69,9 +74,16 @@ CASES: list[tuple[str, str, Status]] = [
         Status.OUT_OF_STOCK,
     ),
     (
-        "no JSON-LD, only pre-order language -> pre-order",
+        "no JSON-LD, only pre-order language -> refuses to claim buyable",
         "<html><body><h1>Zelda Switch 2</h1><button>Pre-order</button>" + FILLER + "</body></html>",
-        Status.PREORDER,
+        Status.UNKNOWN,
+    ),
+    (
+        "REGRESSION: Target-shaped page (one 'add to cart', no sold-out text, "
+        "no JSON-LD) must NOT report in stock",
+        "<html><body><h1>Zelda Switch 2</h1>"
+        "<div class='rail'><button>Add to cart</button></div>" + FILLER + "</body></html>",
+        Status.UNKNOWN,
     ),
     (
         "anti-bot interstitial is BLOCKED, not out of stock",
@@ -108,6 +120,39 @@ def old_check(text: str):
     return None
 
 
+# Captured live from target.com on 2026-09-09 for this exact product.
+TARGET_SOLD_OUT_PROBE = {
+    "btns": [
+        {"dt": "@web/ZipCodeButton/StyledZipCodeButton", "text": "Ship to 28277", "disabled": False},
+        {"dt": "", "text": "Pickup Not available", "disabled": False},
+        {"dt": "", "text": "Delivery Check availability", "disabled": False},
+        {"dt": "", "text": "Shipping Not available", "disabled": False},
+        {"dt": "Preorder.Disabled", "text": "Preorder", "disabled": True},
+    ],
+    "fulfil": ["Pickup Not available Delivery Check availability Shipping Not available Coming October 29"],
+}
+
+# The same page once the pre-order window opens.
+TARGET_LIVE_PROBE = {
+    "btns": [
+        {"dt": "@web/ZipCodeButton/StyledZipCodeButton", "text": "Ship to 28277", "disabled": False},
+        {"dt": "Preorder", "text": "Preorder", "disabled": False},
+    ],
+    "fulfil": ["Shipping Arrives by October 29 Preorder"],
+}
+
+BROWSER_CASES = [
+    ("browser: disabled Preorder button -> out of stock", TARGET_SOLD_OUT_PROBE, Status.OUT_OF_STOCK),
+    ("browser: enabled Preorder button -> preorder", TARGET_LIVE_PROBE, Status.PREORDER),
+    (
+        "browser: enabled Add to cart -> in stock",
+        {"btns": [{"dt": "", "text": "Add to cart", "disabled": False}], "fulfil": []},
+        Status.IN_STOCK,
+    ),
+    ("browser: nothing recognisable -> unknown", {"btns": [], "fulfil": []}, Status.UNKNOWN),
+]
+
+
 def main() -> int:
     failures = 0
     product = {"key": "t", "name": "Test", "url": "https://example.test/p", "kind": "product"}
@@ -123,6 +168,15 @@ def main() -> int:
             print(f"        expected {expected.value}, got {got.status.value} ({got.source}: {got.reason})")
 
     print()
+    for label, probe, expected in BROWSER_CASES:
+        got = browser_detect._decide(probe)
+        ok = got.status is expected
+        failures += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  {label}")
+        if not ok:
+            print(f"        expected {expected.value}, got {got.status.value} ({got.reason})")
+
+    print()
     live = page(jsonld=offer("InStock"), main="<h1>Zelda Switch 2</h1><button>Add to cart</button>")
     old = old_check(live)
     detect.fetch = lambda url, timeout=None, _b=live: (_b, 200, "ok")  # noqa: E731
@@ -135,7 +189,7 @@ def main() -> int:
         failures += 1
 
     print()
-    print(f"{len(CASES) + 1} checks, {failures} failure(s)")
+    print(f"{len(CASES) + len(BROWSER_CASES) + 1} checks, {failures} failure(s)")
     return 1 if failures else 0
 
 

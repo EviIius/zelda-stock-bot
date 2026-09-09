@@ -1,0 +1,4 @@
+# Optional but strongly recommended for local runs.
+#   pip install -r requirements-browser.txt
+#   playwright install chromium
+playwright>=1.44

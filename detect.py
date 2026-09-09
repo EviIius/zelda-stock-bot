@@ -297,18 +297,33 @@ def _phrases(body: str) -> Result:
     buy = [p for p in BUY_PHRASES if p in text]
     sold = [p for p in SOLD_PHRASES if p in text]
 
-    if buy and not sold:
-        status = Status.PREORDER if any("order" in p for p in buy) else Status.IN_STOCK
-        return Result(status, f"page text shows {buy} and no sold-out language", "phrases")
+    # IMPORTANT ASYMMETRY: this layer is allowed to say "definitely not
+    # buyable" or "I don't know", but it is NEVER allowed to say "buyable".
+    #
+    # Why: Target's product page contains the string "add to cart" exactly
+    # once in 334KB of HTML, and the string "out of stock" zero times --
+    # because the real state ("Shipping: Not available", a *disabled*
+    # Preorder button) is rendered by JavaScript after load. Naive phrase
+    # matching therefore reported a sold-out pre-order as IN STOCK.
+    #
+    # A false negative costs one missed alert, and the health warning tells
+    # you the retailer has gone unreadable. A false positive trains you to
+    # ignore the notification that actually matters. Positive claims must
+    # come from a structured source: an API, JSON-LD, embedded app state,
+    # or a real rendered DOM (see browser_detect.py).
     if sold and not buy:
         return Result(Status.OUT_OF_STOCK, f"page text shows {sold}", "phrases")
-    if buy and sold:
-        # Both present -- almost always because of recommendation rails.
-        # Refusing to guess here is the single most important fix in this
-        # file; guessing is what made the old script useless.
+    if buy and not sold:
         return Result(
             Status.UNKNOWN,
-            f"ambiguous: buy={buy} and sold={sold} both present; need an API key for this retailer",
+            f"saw {buy} but no structured availability data; refusing to claim "
+            f"in-stock from page text alone (install Playwright for a real answer)",
+            "phrases",
+        )
+    if buy and sold:
+        return Result(
+            Status.UNKNOWN,
+            f"ambiguous: buy={buy} and sold={sold} both present (recommendation rails)",
             "phrases",
         )
     return Result(Status.UNKNOWN, "no recognisable buy or sold-out language on page", "phrases")
@@ -317,6 +332,19 @@ def _phrases(body: str) -> Result:
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
+def _browser_check(product: dict) -> Result | None:
+    if not config.USE_BROWSER:
+        return None
+    try:
+        import browser_detect
+    except ImportError:
+        return None
+    result = browser_detect.check(product)
+    if result is not None and result.status not in (Status.ERROR, Status.UNKNOWN):
+        return result
+    return None
+
+
 def check_product(product: dict) -> Result:
     if product.get("sku"):
         result = _bestbuy_api(product["sku"])
@@ -328,21 +356,32 @@ def check_product(product: dict) -> Result:
             return result
 
     body, http_status, note = fetch(product["url"])
-    if body is None:
-        return Result(Status.BLOCKED if "bot protection" in note else Status.ERROR, note, "fetch")
 
-    if any(marker in body for marker in BOT_WALL):
-        return Result(Status.BLOCKED, "anti-bot interstitial served instead of the page", "fetch",
-                      http_status=http_status, body_len=len(body))
-    if len(body) < 5000:
-        return Result(Status.BLOCKED, f"suspiciously small response ({len(body)} bytes)", "fetch",
-                      http_status=http_status, body_len=len(body))
+    # Blocked or unfetchable: a rendered browser sometimes gets through
+    # where a bare HTTP request does not, so it's worth one attempt.
+    if body is None or any(marker in body for marker in BOT_WALL) or len(body) < 5000:
+        rendered = _browser_check(product)
+        if rendered is not None:
+            return rendered
+        if body is None:
+            return Result(Status.BLOCKED if "bot protection" in note else Status.ERROR, note, "fetch")
+        reason = ("anti-bot interstitial served instead of the page"
+                  if len(body) >= 5000 else f"suspiciously small response ({len(body)} bytes)")
+        return Result(Status.BLOCKED, reason, "fetch", http_status=http_status, body_len=len(body))
 
+    # Structured signals in the fetched HTML are cheapest and most reliable
+    # -- GameStop, for instance, ships schema.org availability in its raw
+    # HTML, so there is no reason to spend seconds rendering it.
     for layer in (_jsonld, _embedded_state):
         result = layer(body)
         if result is not None:
             result.http_status, result.body_len = http_status, len(body)
             return result
+
+    # Nothing structured in the HTML (Target). Render it properly.
+    rendered = _browser_check(product)
+    if rendered is not None:
+        return rendered
 
     result = _phrases(body)
     result.http_status, result.body_len = http_status, len(body)

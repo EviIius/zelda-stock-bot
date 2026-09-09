@@ -150,6 +150,41 @@ def maybe_health_alert(product: dict, entry: dict, result: detect.Result) -> boo
 
 
 
+
+def maybe_heartbeat(state: dict) -> None:
+    """
+    Once a day, report that the monitor is alive and what it currently sees.
+
+    Without this, "no alerts" is ambiguous: it could mean the item is still
+    unavailable, or it could mean the terminal got closed three days ago.
+    """
+    if not config.HEARTBEAT_ENABLED:
+        return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if state.get("last_heartbeat_date") == today:
+        return
+    if datetime.now().hour < config.HEARTBEAT_HOUR:
+        return
+
+    lines = []
+    for product in config.PRODUCTS:
+        entry = state["products"].get(product["key"], {})
+        status = entry.get("status") or "unknown"
+        lines.append(f"{ICON.get(Status(status), '?') if status in {s.value for s in Status} else '?'} "
+                     f"{product['name']}: {status}")
+
+    notify.send(
+        notify.Alert(
+            title="\U0001f4a4 Zelda bot daily check-in",
+            body="Still running. Current readings:\n\n" + "\n".join(lines),
+            urgent=False,
+        )
+    )
+    state["last_heartbeat_date"] = today
+    print("    daily heartbeat sent")
+
+
 # ---------------------------------------------------------------------------
 # Social feeds (@Wario64 / @IGNDeals)
 # ---------------------------------------------------------------------------
@@ -249,6 +284,7 @@ def run_pass(state: dict, debug: bool = False) -> None:
         entry["status"] = result.status.value
 
     check_feeds(state)
+    maybe_heartbeat(state)
     save_state(state)
 
 

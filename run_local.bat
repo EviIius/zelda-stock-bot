@@ -35,6 +35,20 @@ if not exist ".env" (
     exit /b 1
 )
 
+python -c "import playwright" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo   NOTE: Playwright isn't installed, so Target cannot be checked
+    echo   reliably ^(it builds its buy box in JavaScript^). To fix:
+    echo.
+    echo       pip install -r requirements-browser.txt
+    echo       playwright install chromium
+    echo.
+    echo   Continuing without it - Target will report "unknown".
+    echo.
+    timeout /t 5 >nul
+)
+
 echo.
 echo   Sending a test alert first...
 echo.

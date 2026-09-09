@@ -89,6 +89,16 @@ PRODUCTS = [
         "cart_url": "https://api.bestbuy.com/click/-/6691841/cart",
     },
     {
+        "key": "gamestop",
+        "name": "GameStop",
+        "url": "https://www.gamestop.com/consoles-hardware/nintendo-switch-2/products/"
+               "nintendo-switch-2-the-legend-of-zelda-40th-anniversary-edition/451607.html",
+        "kind": "product",
+        # GameStop ships schema.org availability in its raw HTML, so plain
+        # HTTP resolves this one cleanly -- no browser rendering needed.
+        "cart_url": None,
+    },
+    {
         "key": "nintendo",
         "name": "Nintendo Store",
         "url": "https://www.nintendo.com/us/store/products/nintendo-switch-2-the-legend-of-zelda-40th-anniversary-edition-121642/",
@@ -134,6 +144,14 @@ MAX_REALERTS = _int("MAX_REALERTS", 6)
 HEALTH_ALERT_AFTER_MINUTES = _int("HEALTH_ALERT_AFTER_MINUTES", 90)
 HEALTH_ALERT_COOLDOWN_MINUTES = _int("HEALTH_ALERT_COOLDOWN_MINUTES", 360)
 
+# Daily "still alive" summary, so silence means healthy rather than
+# ambiguous. The health alert above catches hard failures; this catches the
+# softer ones -- a closed laptop, a killed terminal, a machine that rebooted
+# overnight. Sent at or after this local hour, once per calendar day.
+HEARTBEAT_ENABLED = (os.environ.get("HEARTBEAT_ENABLED", "1").strip().lower()
+                     not in ("0", "false", "no", ""))
+HEARTBEAT_HOUR = _int("HEARTBEAT_HOUR", 8)
+
 # ---------------------------------------------------------------------------
 # Social feed watching (@Wario64 etc). Best-effort -- see feeds.py.
 # ---------------------------------------------------------------------------
@@ -151,5 +169,23 @@ STATE_FILE = os.environ.get(
 # Optional API keys (set as env vars / GitHub secrets). Each one upgrades a
 # retailer from "scrape the HTML and hope" to a real structured answer.
 # ---------------------------------------------------------------------------
+# Render pages in a real headless browser (Playwright) before falling back
+# to plain HTTP. Required for Target, which builds its buy box in JS.
+# "auto" = use it when Playwright is installed. Set 0 to force it off.
+_ub = os.environ.get("USE_BROWSER", "auto").strip().lower()
+if _ub in ("0", "false", "no", "off"):
+    USE_BROWSER = False
+elif _ub in ("1", "true", "yes", "on"):
+    USE_BROWSER = True
+else:
+    try:
+        import playwright.sync_api  # noqa: F401
+
+        USE_BROWSER = True
+    except ImportError:
+        USE_BROWSER = False
+
+BROWSER_TIMEOUT_MS = _int("BROWSER_TIMEOUT_MS", 30000)
+
 BESTBUY_API_KEY = os.environ.get("BESTBUY_API_KEY", "").strip()
 TARGET_API_KEY = os.environ.get("TARGET_API_KEY", "").strip()

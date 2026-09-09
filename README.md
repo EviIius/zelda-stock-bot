@@ -1,7 +1,7 @@
 # Zelda Switch 2 Stock Monitor
 
-Watches Target, Walmart, Best Buy, the Nintendo Store and Costco for the
-**Nintendo Switch 2 — The Legend of Zelda 40th Anniversary Edition**
+Watches Target, Walmart, Best Buy, GameStop, the Nintendo Store and Costco
+for the **Nintendo Switch 2 — The Legend of Zelda 40th Anniversary Edition**
 (Best Buy SKU `6691841`, $519.99, release 10/29/2026) and pushes an alert
 the moment it becomes buyable — in stock *or* a pre-order window
 reopening.
@@ -49,15 +49,43 @@ trustworthy one:
 
 | Layer | Signal | Reliability |
 |---|---|---|
-| 1 | Official retailer API (Best Buy; Target with a key) | Definitive |
-| 2 | `schema.org` JSON-LD `offers.availability` | High |
-| 3 | Embedded app state (`__NEXT_DATA__`) | Good |
-| 4 | Scoped page-text phrases | Last resort |
+| 1 | Rendered DOM via Playwright (`browser_detect.py`) | Definitive |
+| 2 | Official retailer API (Best Buy; Target with a key) | Definitive |
+| 3 | `schema.org` JSON-LD `offers.availability` | High |
+| 4 | Embedded app state (`__NEXT_DATA__`) | Good |
+| 5 | Scoped page-text phrases | Negative evidence only |
 
-Layer 4 **refuses to answer** when a page contains both buy and sold-out
-language, reporting `unknown` instead of guessing. That's deliberate — a
-confident wrong answer is worse than an honest "I don't know", because
-you'd never know to go look.
+**Layer 5 can never report "in stock".** It may say "definitely not
+buyable" or "I don't know", nothing more. This is the most important rule
+in the codebase, and it was learned the hard way — measured on Target's
+page for this product:
+
+```
+raw HTML:  "add to cart" x1,  "out of stock" x0,  0 JSON-LD blocks
+rendered:  <button data-test="Preorder.Disabled" disabled>Preorder</button>
+           "Pickup Not available / Shipping Not available / Coming October 29"
+```
+
+The HTML Python receives contains *no availability information at all*,
+so phrase matching alerted "IN STOCK" on a sold-out pre-order. A false
+negative costs one missed alert and trips the health warning. A false
+positive teaches you to ignore the one notification that matters. Positive
+claims therefore require structured evidence: an API, JSON-LD, app state,
+or a real rendered DOM.
+
+### Why Playwright matters here
+
+Target is unreadable without it — you'll get `unknown` forever. Install it
+for local runs:
+
+```
+pip install -r requirements-browser.txt
+playwright install chromium
+```
+
+It renders the page like a real browser and reads whether the buy button
+is actually enabled, which is the thing that flips on a restock. Detection
+falls back to the HTTP layers automatically if it isn't installed.
 
 Statuses: `in_stock` and `preorder` alert you. `out_of_stock` is quiet.
 `blocked`, `error` and `unknown` mean the check learned nothing — they
@@ -238,6 +266,27 @@ the response size for each retailer. A body of a few hundred bytes plus
 structure moved and the phrase layer is correctly declining to guess.
 
 ---
+
+## Daily check-in
+
+Once a day at or after 8am local, the bot posts a quiet summary of what it
+currently sees. Without it, "no alerts" is ambiguous — it could mean the
+console is still unavailable, or it could mean the terminal got closed
+three days ago. The 90-minute health alert catches hard failures; this
+catches the soft ones (a closed laptop, an overnight reboot).
+
+Set `HEARTBEAT_HOUR` to move it, or `HEARTBEAT_ENABLED=0` to turn it off.
+
+## Which retailers need what
+
+| Retailer | Resolved by | Notes |
+|---|---|---|
+| GameStop | JSON-LD in raw HTML | Cleanest of the lot; plain HTTP is enough |
+| Target | Rendered DOM only | Needs Playwright — HTML carries no availability at all |
+| Walmart | Rendered DOM / blocked | Aggressive bot detection; local IP required |
+| Best Buy | JSON-LD, or the API | API needs a non-free email address (unavailable) |
+| Nintendo | JSON-LD / app state | Usually fine |
+| Costco | Phrase watch | Watching for the edition to appear at all |
 
 ## Tuning
 
