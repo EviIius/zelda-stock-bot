@@ -4,8 +4,8 @@
     "target": {
       "status": "in_stock",
       "since": 1788922898.029309,
-      "last_alert_ts": 1788922897.431664,
-      "alert_count": 1,
+      "last_alert_ts": 1788924230.6614366,
+      "alert_count": 2,
       "bad_since": null,
       "last_health_alert_ts": 0.0
     },
@@ -44,6 +44,6 @@
   },
   "feeds": {
     "seen": [],
-    "last_check": 1788923873.16439
+    "last_check": 1788924327.125124
   }
 }
