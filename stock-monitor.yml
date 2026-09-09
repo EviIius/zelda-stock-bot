@@ -1,0 +1,40 @@
+name: Stock Monitor
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub may delay this by a few minutes during
+    # high load — it's a "best effort" scheduler, not exact.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated state file
+
+jobs:
+  check-stock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run stock check
+        env:
+          SMS_TO_NUMBER: ${{ secrets.SMS_TO_NUMBER }}
+          SMS_CARRIER_GATEWAY: ${{ secrets.SMS_CARRIER_GATEWAY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python stock_monitor.py
+
+      - name: Commit updated state file
+        run: |
+          git config user.name "stock-bot"
+          git config user.email "stock-bot@users.noreply.github.com"
+          git add stock_state.json
+          git diff --staged --quiet || git commit -m "update stock state [skip ci]"
+          git push
