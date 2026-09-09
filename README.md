@@ -97,8 +97,10 @@ account.
 It looks like `https://discord.com/api/webhooks/123.../abc...`.
 
 **Treat that URL like a password** — anyone who has it can post into your
-channel. Don't commit it to the repo; that's what `.gitignore` and repo
-secrets are for.
+channel. Don't commit it, and don't paste it into a screenshot or a chat.
+If it ever leaks, delete the webhook in Discord and create a new one;
+that instantly invalidates the old URL. `.env` and `stock_state.json` are
+gitignored so they can't be committed by accident.
 
 *Webhooks are a desktop/browser feature. On mobile, use the browser
 version of Discord to do this part.*
@@ -108,7 +110,8 @@ version of Discord to do this part.*
 In PowerShell, from the repo folder:
 
 ```powershell
-$env:DISCORD_WEBHOOK_URL = "paste-your-webhook-url-here"
+copy .env.example .env
+notepad .env          # paste your webhook after DISCORD_WEBHOOK_URL=
 pip install -r requirements.txt
 python stock_monitor.py --test-alert
 ```
@@ -141,18 +144,24 @@ now rather than finding out during the drop.
 
 ### 6. Run it
 
-Locally — open `run_local.bat` in Notepad, paste your webhook between the
-`=` and the closing quote on the `DISCORD_WEBHOOK_URL` line, save, and
-double-click it. It sends a test alert first and refuses to start if that
-fails.
+Locally — copy `.env.example` to `.env`, open `.env` in Notepad, and paste
+your webhook after the `=`:
 
-**Don't add your own quotes around the URL in the `.bat` file.** Batch
-takes everything after the `=` literally, so quotes you type become part
-of the value and the request fails. The line is already written as
-`set "DISCORD_WEBHOOK_URL=..."`, which is the safe form — just paste
-inside the existing quotes. (PowerShell is the opposite and *does* need
-them: `$env:DISCORD_WEBHOOK_URL = "..."`. The script strips stray quotes
-either way, so a mistake here won't cost you anything.)
+```
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123.../abc...
+```
+
+Then double-click `run_local.bat`. There is nothing to edit in the `.bat`
+itself; it reads `.env`, sends a test alert, and refuses to start the loop
+if that test fails.
+
+Quotes around the value are optional and stray ones are stripped, as is
+trailing whitespace and a Notepad byte-order mark. This indirection exists
+on purpose: putting secrets directly in a `.bat` file is a trap, because
+batch treats quotes you type as part of the value, and a paste landing on
+the wrong side of an existing quote produces a mangled variable with a
+confusing error. `.env` has none of those rules. It's also gitignored, so
+your webhook can't be committed by accident.
 
 On GitHub Actions — **Settings → Secrets and variables → Actions → New
 repository secret**, name `DISCORD_WEBHOOK_URL`, paste the URL. Then

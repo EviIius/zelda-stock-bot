@@ -26,6 +26,14 @@ import requests
 TIMEOUT = 15
 
 
+def _clean(name: str) -> str:
+    """
+    Read an env var, tolerating the ways a URL gets mangled on the way in:
+    stray surrounding quotes, trailing whitespace, a newline from a paste.
+    """
+    return os.environ.get(name, "").strip().strip('"').strip("'").strip()
+
+
 @dataclass
 class Alert:
     title: str
@@ -40,7 +48,7 @@ class Alert:
 # Discord
 # ---------------------------------------------------------------------------
 def _discord(alert: Alert) -> None:
-    webhook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    webhook = _clean("DISCORD_WEBHOOK_URL")
     if not webhook:
         return
 
@@ -74,8 +82,8 @@ def _discord(alert: Alert) -> None:
 # Pushover
 # ---------------------------------------------------------------------------
 def _pushover(alert: Alert) -> None:
-    token = os.environ.get("PUSHOVER_TOKEN", "").strip()
-    user = os.environ.get("PUSHOVER_USER", "").strip()
+    token = _clean("PUSHOVER_TOKEN")
+    user = _clean("PUSHOVER_USER")
     if not (token and user):
         return
 
@@ -102,10 +110,10 @@ def _pushover(alert: Alert) -> None:
 # Carrier email-to-SMS gateway (free, but slow -- keep as a backup only)
 # ---------------------------------------------------------------------------
 def _sms(alert: Alert) -> None:
-    to_number = os.environ.get("SMS_TO_NUMBER", "").strip()
-    gateway = os.environ.get("SMS_CARRIER_GATEWAY", "").strip()
-    gmail_user = os.environ.get("GMAIL_USER", "").strip()
-    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    to_number = _clean("SMS_TO_NUMBER")
+    gateway = _clean("SMS_CARRIER_GATEWAY")
+    gmail_user = _clean("GMAIL_USER")
+    gmail_pass = _clean("GMAIL_APP_PASSWORD")
     if not all([to_number, gateway, gmail_user, gmail_pass]):
         return
     if not alert.urgent:
@@ -127,14 +135,11 @@ CHANNELS = {"discord": _discord, "pushover": _pushover, "sms": _sms}
 
 def configured_channels() -> list[str]:
     names = []
-    if os.environ.get("DISCORD_WEBHOOK_URL", "").strip():
+    if _clean("DISCORD_WEBHOOK_URL"):
         names.append("discord")
-    if os.environ.get("PUSHOVER_TOKEN", "").strip() and os.environ.get("PUSHOVER_USER", "").strip():
+    if _clean("PUSHOVER_TOKEN") and _clean("PUSHOVER_USER"):
         names.append("pushover")
-    if all(
-        os.environ.get(k, "").strip()
-        for k in ("SMS_TO_NUMBER", "SMS_CARRIER_GATEWAY", "GMAIL_USER", "GMAIL_APP_PASSWORD")
-    ):
+    if all(_clean(k) for k in ("SMS_TO_NUMBER", "SMS_CARRIER_GATEWAY", "GMAIL_USER", "GMAIL_APP_PASSWORD")):
         names.append("sms")
     return names
 

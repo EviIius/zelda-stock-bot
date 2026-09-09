@@ -10,6 +10,38 @@ from __future__ import annotations
 import os
 
 
+def _load_dotenv() -> None:
+    """
+    Load KEY=VALUE lines from a .env file next to this script.
+
+    This exists so secrets never have to be typed into a .bat file, where
+    Windows batch quoting rules are a genuine trap: quotes you add become
+    part of the value, and a paste landing on the wrong side of an existing
+    quote silently produces nonsense.
+
+    Values may be quoted or not, either works. Real environment variables
+    always win, so GitHub Actions secrets are unaffected by this.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    # utf-8-sig because Notepad writes a byte-order mark that would
+    # otherwise end up glued to the first key name.
+    with open(path, encoding="utf-8-sig") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'").strip()
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv()
+
+
 def _int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name) or default)
