@@ -344,6 +344,9 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("Live retailer feed", panel)
         self.assertIn("Add link", panel)
         self.assertIn("product_catalog.save_custom_products", panel)
+        self.assertIn("+ Add Product", panel)
+        self.assertIn("How it works", panel)
+        self.assertIn("--show-guide", panel)
 
     def test_custom_product_catalog_round_trip_and_retailer_inference(self):
         path = os.path.join(self.tmp.name, "custom-products.json")

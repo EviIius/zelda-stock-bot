@@ -320,7 +320,8 @@ stock, pre-order, out-of-stock, blocked, and error result. Closing the panel
 leaves monitoring active. **Stop Bot** disables both scheduled tasks so the
 watchdog does not restart a monitor that you intentionally stopped.
 
-Select **Products** in the control panel to manage additional links without
+Use the prominent **Add Product** card, or select **Manage products**, to add
+and manage links without
 editing Python:
 
 - **Stock / preorder** watches a product page for a trustworthy structured or

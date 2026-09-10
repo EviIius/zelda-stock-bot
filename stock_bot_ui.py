@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -252,7 +253,7 @@ class ProductEditor(tk.Toplevel):
 
 
 class ProductManager(tk.Toplevel):
-    def __init__(self, parent: "StockBotPanel") -> None:
+    def __init__(self, parent: "StockBotPanel", open_add: bool = False) -> None:
         super().__init__(parent)
         self.parent_panel = parent
         self.title("Product monitors")
@@ -303,6 +304,8 @@ class ProductManager(tk.Toplevel):
         ttk.Button(actions, text="Remove", command=self._remove).pack(side="left", padx=4)
         ttk.Button(actions, text="Close", command=self.destroy).pack(side="right", padx=4)
         self._refresh()
+        if open_add:
+            self.after(150, self._add)
 
     def _refresh(self) -> None:
         self.table.delete(*self.table.get_children())
@@ -420,6 +423,10 @@ class StockBotPanel(tk.Tk):
         style.configure("Muted.TLabel", background=self.PANEL, foreground=self.MUTED,
                         font=("Segoe UI", 9))
         style.configure("Action.TButton", font=("Segoe UI Semibold", 10), padding=(15, 9))
+        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=(15, 9),
+                        background="#2563eb", foreground="white")
+        style.map("Accent.TButton", background=[("active", "#3b82f6")],
+                  foreground=[("active", "white")])
         style.configure("TCheckbutton", background=self.PANEL, foreground=self.TEXT)
         style.map("TCheckbutton", background=[("active", self.PANEL)])
 
@@ -446,11 +453,27 @@ class StockBotPanel(tk.Tk):
         self.stop_button.pack(side="left", padx=4)
         header.columnconfigure(0, weight=1)
 
+        catalog = ttk.Frame(self, style="Panel.TFrame", padding=(16, 11))
+        catalog.pack(fill="x", padx=14, pady=(0, 8))
+        catalog.columnconfigure(0, weight=1)
+        ttk.Label(catalog, text="Monitor any product link", style="Status.TLabel",
+                  font=("Segoe UI Semibold", 12)).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            catalog,
+            text="Paste a product page for stock/preorder alerts, or a listing page to watch for its launch.",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        ttk.Button(catalog, text="+ Add Product", style="Accent.TButton",
+                   command=self._add_product).grid(row=0, column=1, rowspan=2, padx=(12, 5))
+        ttk.Button(catalog, text="How it works", command=self._show_product_help).grid(
+            row=0, column=2, rowspan=2, padx=(5, 0))
+
         feed_header = ttk.Frame(self, style="Panel.TFrame", padding=(12, 8))
         feed_header.pack(fill="x", padx=14)
         ttk.Label(feed_header, text="Live retailer feed", style="Status.TLabel").pack(side="left")
         ttk.Button(feed_header, text="Open logs", command=self._open_logs).pack(side="right", padx=(6, 0))
-        ttk.Button(feed_header, text="Products", command=self._open_products).pack(side="right", padx=(6, 0))
+        ttk.Button(feed_header, text="Manage products", command=self._open_products).pack(
+            side="right", padx=(6, 0))
         ttk.Button(feed_header, text="Clear view", command=lambda: self.feed.delete("1.0", "end")).pack(
             side="right", padx=(6, 0))
         ttk.Checkbutton(feed_header, text="Follow newest", variable=self.follow_feed).pack(side="right")
@@ -586,11 +609,32 @@ class StockBotPanel(tk.Tk):
     def _open_products(self) -> None:
         ProductManager(self)
 
+    def _add_product(self) -> None:
+        ProductManager(self, open_add=True)
+
+    def _show_product_help(self) -> None:
+        messagebox.showinfo(
+            "How to monitor any product",
+            "1. Click Add Product.\n\n"
+            "2. Paste a product or listing URL.\n\n"
+            "3. Choose Stock / preorder for a normal product page, or Listing goes live "
+            "and enter a unique phrase for an unpublished product.\n\n"
+            "4. Select the primary or secondary Discord channel and a polling interval.\n\n"
+            "5. Save. Stock Watch safely reloads the service automatically.\n\n"
+            "6. Open Manage products and use Test selected to inspect detection without "
+            "sending an alert.\n\n"
+            "Your existing Zelda alerts remain active and are not changed by custom products.",
+            parent=self,
+        )
+
 
 def main() -> None:
     if os.name != "nt":
         raise SystemExit("The desktop control panel is currently available on Windows only.")
-    StockBotPanel().mainloop()
+    panel = StockBotPanel()
+    if "--show-guide" in sys.argv:
+        panel.after(500, panel._show_product_help)
+    panel.mainloop()
 
 
 if __name__ == "__main__":
