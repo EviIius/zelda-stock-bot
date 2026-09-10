@@ -6,6 +6,24 @@ $python = (Get-Command python).Source
 $powershell = (Get-Command powershell.exe).Source
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
+& $python -c "import sys; raise SystemExit(sys.version_info < (3, 11))"
+if ($LASTEXITCODE -ne 0) {
+    throw "Python 3.11 or newer is required."
+}
+& $python -m pip install -r (Join-Path $repoDir "requirements.txt") `
+    -r (Join-Path $repoDir "requirements-browser.txt")
+if ($LASTEXITCODE -ne 0) {
+    throw "Python dependency installation failed."
+}
+& $python -m playwright install chromium
+if ($LASTEXITCODE -ne 0) {
+    throw "Playwright Chromium installation failed."
+}
+& $python -m unittest discover -s $repoDir -p "test_*.py"
+if ($LASTEXITCODE -ne 0) {
+    throw "Project self-tests failed; scheduled tasks were not installed."
+}
+
 $monitorAction = New-ScheduledTaskAction -Execute $powershell -Argument (
     '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $serviceScript
 )

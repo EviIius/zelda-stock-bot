@@ -6,10 +6,11 @@ both releasing 10/29/2026. An alert goes out the moment either becomes
 buyable — in stock *or* a pre-order window reopening.
 
 Target, GameStop and Nintendo run as independent 25-second workers for each
-item. The controller's Best Buy page runs a fast browser-TLS check independently
-every 60 seconds and skips its known multi-minute browser stall, so its bot wall
-cannot delay the other six workers. Walmart, console
-Best Buy and Costco remain disabled by default and can be enabled separately.
+item. Walmart and Best Buy run as independent 60-second workers, so a retailer
+bot wall cannot delay any other check. Walmart uses exact-item state from its
+ID search and reports a blocked/error result if Walmart challenges the request;
+it never opens a browser or trusts recommendation-rail metadata. Best Buy is
+also HTTP-only. Costco remains disabled by default.
 
 Console and controller channels each get their own quiet live-status message,
 refreshed every minute with the age and latency of every check. Availability
@@ -33,12 +34,12 @@ cd zelda-stock-bot
 ```
 
 The installer finds Python 3.11+, creates an isolated `.venv`, installs
-Playwright and Chromium into the repository, securely prompts for the console
+Playwright and Chromium into the repository, runs the project self-tests,
+securely prompts for the console
 and controller Discord webhooks, sends a test to each channel, and installs
 `com.eviiius.zelda-stock-monitor` as a system `launchd` daemon. The daemon:
 
-- starts automatically at boot, even before login;
-- runs as the user who installed it rather than as root;
+- starts automatically at boot and runs as the user who installed it;
 - restarts automatically after a crash;
 - prevents idle sleep while healthy, without permanently changing power settings;
 - writes timestamped output to a 5 MB rotating log under `logs/` (five backups); and
@@ -47,7 +48,7 @@ and controller Discord webhooks, sends a test to each channel, and installs
 The Mac must remain powered and connected to the internet. A MacBook must also
 remain open; macOS still sleeps when its lid is closed. Clone directly under
 your home folder as shown above—Documents, Desktop, and Downloads have macOS
-privacy restrictions that can block boot services.
+privacy restrictions that can block unattended agents.
 
 Useful commands after installation:
 
@@ -300,7 +301,9 @@ Run this once from PowerShell:
 powershell -ExecutionPolicy Bypass -File .\install_windows_tasks.ps1
 ```
 
-This installs two hidden scheduled tasks. `Zelda Stock Monitor` starts at logon
+The installer verifies Python 3.11+, installs the Python/browser dependencies
+and Chromium, runs the project self-tests, then installs two hidden scheduled
+tasks. `Zelda Stock Monitor` starts at logon
 and restarts after failures; `Zelda Stock Monitor Watchdog` runs independently
 every two minutes and alerts if the monitor heartbeat is stale. Service logs are
 retained for 14 days under `logs/`. The launcher removes a validated orphaned
@@ -399,10 +402,10 @@ catches the soft ones.
 
 | Retailer | Resolved by | Notes |
 |---|---|---|
-| GameStop | Browser-TLS HTTP + JSON-LD | Avoids intermittent Cloudflare blocks without launching Chrome |
-| Target | Rendered DOM only | Needs Playwright — HTML carries no availability at all |
-| Walmart | Rendered DOM / blocked | Aggressive bot detection; local IP required |
-| Best Buy | JSON-LD, or the API | API needs a non-free email address (unavailable) |
+| GameStop | HTTP TLS profile + JSON-LD | Avoids intermittent Cloudflare blocks without launching Chrome |
+| Target | Headless rendered DOM | Needs Playwright/Chromium — HTML carries no availability at all; no visible window opens |
+| Walmart | HTTP exact-ID search state | Never launches Chromium; recommendation inventory is ignored and a bot challenge is reported rather than guessed |
+| Best Buy | HTTP official Q&A SKU button or the API | Never launches Chromium; avoids the PDP's intermittent HTTP/2 resets and rejects optimistic JSON-LD |
 | Nintendo | JSON-LD / app state | Usually fine |
 | Costco | Phrase watch | Watching for the edition to appear at all |
 

@@ -61,6 +61,7 @@ VENV_PYTHON="${REPO_DIR}/.venv/bin/python"
 mkdir -p "${BROWSER_DIR}" "${LOG_DIR}"
 export PLAYWRIGHT_BROWSERS_PATH="${BROWSER_DIR}"
 "${VENV_PYTHON}" -m playwright install chromium
+"${VENV_PYTHON}" -m unittest discover -s "${REPO_DIR}" -p 'test_*.py'
 
 webhooks_valid() {
     "${VENV_PYTHON}" - "${REPO_DIR}/.env" <<'PY'

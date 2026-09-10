@@ -30,12 +30,13 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
 try:
     from curl_cffi import requests as curl_requests
-except ImportError:  # optional TLS-browser impersonation fallback
+except ImportError:  # optional HTTP TLS-profile fallback
     curl_requests = None
 
 import config
@@ -94,6 +95,7 @@ BASE_HEADERS = {
 BOT_WALL = (
     "pardon our interruption",
     "are you a human",
+    "robot or human",
     "verify you are a human",
     "verifying you are human",
     "unusual traffic",
@@ -128,6 +130,15 @@ def _dns_failed(note: str) -> bool:
     return any(marker in lowered for marker in DNS_FAILURE_MARKERS)
 
 
+def _with_query(url: str, **updates: str) -> str:
+    """Return *url* with query parameters added or replaced."""
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(updates)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
+
+
 def fetch(url: str, timeout: int | None = None,
           attempts: int | None = None) -> tuple[str | None, int | None, str]:
     """Return (lowercased_body, http_status, note). body is None on failure."""
@@ -135,21 +146,53 @@ def fetch(url: str, timeout: int | None = None,
     last_note = "no attempt made"
 
     # Cloudflare increasingly rejects Python/OpenSSL before page content is
-    # considered. curl_cffi presents a current browser TLS fingerprint and is
-    # dramatically faster than launching a browser when the page is public.
+    # considered. curl_cffi presents a current HTTP TLS profile without
+    # launching a browser.
     if curl_requests is not None:
-        try:
-            resp = curl_requests.get(url, impersonate="chrome", timeout=timeout,
-                                     headers={"Accept-Language": "en-US,en;q=0.9"})
-            if resp.status_code < 400:
-                return resp.text.lower(), resp.status_code, "ok (browser TLS)"
-            last_note = f"HTTP {resp.status_code} via browser TLS"
-        except Exception as exc:  # noqa: BLE001
-            last_note = f"browser TLS {type(exc).__name__}: {exc}"
-            # A second HTTP stack and a browser cannot repair a system DNS
-            # outage. Return promptly so the worker keeps a useful cadence.
-            if _dns_failed(last_note):
-                return None, None, last_note
+        tls_requests = [("chrome", url)]
+        if "walmart.com" in url:
+            # Walmart challenges HTTP TLS profiles selectively. These
+            # remain the same public product page, but alternate a normal
+            # navigation query and fingerprint. In live tests one can be
+            # challenged while the next returns the full item payload.
+            if urlsplit(url).path.startswith("/search"):
+                tls_requests.extend([
+                    ("chrome_android", url),
+                    ("safari", url),
+                ])
+            else:
+                tls_requests.extend([
+                    ("chrome_android", _with_query(url, **{"from": "/search"})),
+                    ("safari", _with_query(url, selectedSellerId="0")),
+                ])
+
+        for impersonation, tls_url in tls_requests:
+            try:
+                resp = curl_requests.get(
+                    tls_url,
+                    impersonate=impersonation,
+                    timeout=timeout,
+                    headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": "https://www.walmart.com/search?q=nintendo+switch+2+zelda"
+                        if "walmart.com" in url else url,
+                    },
+                )
+                response_body = resp.text.lower()
+                if (resp.status_code < 400
+                        and not any(marker in response_body for marker in BOT_WALL)):
+                    return response_body, resp.status_code, \
+                        f"ok (HTTP TLS profile: {impersonation})"
+                if resp.status_code < 400:
+                    last_note = f"anti-bot interstitial via HTTP TLS profile: {impersonation}"
+                else:
+                    last_note = f"HTTP {resp.status_code} via HTTP TLS profile: {impersonation}"
+            except Exception as exc:  # noqa: BLE001
+                last_note = f"HTTP TLS profile {type(exc).__name__}: {exc}"
+                # A second HTTP stack and a browser cannot repair a system DNS
+                # outage. Return promptly so the worker keeps a useful cadence.
+                if _dns_failed(last_note):
+                    return None, None, last_note
 
     # Best Buy stalls plain HTTP clients rather than refusing them, so three
     # 20-second retries burned ~60s -- longer than the whole check interval.
@@ -419,6 +462,120 @@ def _decisive(result: Result | None) -> bool:
 
 def _retailer_consistency_guard(product: dict, body: str) -> Result | None:
     """Let explicit product-page inventory override known-stale metadata."""
+    if "bestbuy.com" in product.get("url", ""):
+        # Best Buy can advertise schema.org/InStock before a preorder window
+        # opens.  Its embedded product payload is more specific: the actual
+        # SKU's fulfillment button remains `coming_soon` until it is buyable.
+        # Scope the match to this product's SKU so a recommendation rail for a
+        # different item cannot turn the primary product into a false negative.
+        sku = str(product.get("sku", "")).strip()
+        if sku:
+            # Best Buy's lighter server-rendered pages expose the primary
+            # product button directly as HTML attributes. This endpoint is a
+            # reliable fallback when the full product-detail edge resets its
+            # HTTP/2 stream.
+            for tag in re.findall(r"<(?:button|a)\b[^>]{0,2500}>", body, re.S):
+                sku_attr = re.search(r'data-sku-id\s*=\s*["\']([^"\']+)', tag)
+                state_attr = re.search(r'data-button-state\s*=\s*["\']([^"\']+)', tag)
+                if sku_attr and state_attr and sku_attr.group(1) == sku:
+                    button_state = state_attr.group(1).lower()
+                    unavailable_states = {
+                        "coming_soon", "sold_out", "out_of_stock", "unavailable",
+                        "not_available", "see_details",
+                    }
+                    preorder_states = {"preorder", "pre_order", "pre-order"}
+                    in_stock_states = {"add_to_cart", "addtocart"}
+                    if button_state in unavailable_states:
+                        status = Status.OUT_OF_STOCK
+                    elif button_state in preorder_states:
+                        status = Status.PREORDER
+                    elif button_state in in_stock_states:
+                        status = Status.IN_STOCK
+                    else:
+                        continue
+                    structured = _jsonld(body)
+                    return Result(
+                        status,
+                        f"Best Buy exact-SKU button state={button_state}",
+                        "bestbuy-product-button",
+                        price=structured.price if structured else None,
+                    )
+
+            # Best Buy repeats a product in several serialized GraphQL
+            # payloads, and the amount of data between `skuid` and
+            # `fulfillmentoptions` varies between responses.  For each
+            # fulfillment block, associate it with the nearest preceding
+            # skuid instead of depending on a brittle fixed-width regex.
+            fulfillment = re.compile(
+                r'"fulfillmentoptions"\s*:\s*\{.{0,2500}?'
+                r'"buttonstate"\s*:\s*"([a-z_]+)"',
+                re.S,
+            )
+            sku_pattern = re.compile(r'"skuid"\s*:\s*"([^"\\]+)"')
+            unavailable_states = {
+                "coming_soon", "sold_out", "out_of_stock", "unavailable",
+            }
+            preorder_states = {"preorder", "pre_order", "pre-order"}
+            in_stock_states = {"add_to_cart", "addtocart"}
+            for match in fulfillment.finditer(body):
+                prefix = body[max(0, match.start() - 8000):match.start()]
+                preceding_skus = sku_pattern.findall(prefix)
+                if not preceding_skus or preceding_skus[-1] != sku:
+                    continue
+                button_state = match.group(1)
+                if button_state in unavailable_states:
+                    status = Status.OUT_OF_STOCK
+                elif button_state in preorder_states:
+                    status = Status.PREORDER
+                elif button_state in in_stock_states:
+                    status = Status.IN_STOCK
+                else:
+                    continue
+                structured = _jsonld(body)
+                return Result(
+                    status,
+                    f"Best Buy fulfillment buttonState={button_state}",
+                    "bestbuy-product-state",
+                    price=structured.price if structured else None,
+                )
+
+    if "walmart.com" in product.get("url", ""):
+        item_id = re.escape(str(product.get("item_id", "")).strip())
+        if item_id:
+            # The page contains recommendation inventory too. Anchor the
+            # decision to this item's canonical URL or usItemId, then read the
+            # nearest preceding product-level availability value.
+            anchors = list(re.finditer(
+                rf'(?:"canonicalurl"\s*:\s*"[^"\n]*/{item_id}"|'
+                rf'"usitemid"\s*:\s*"{item_id}")',
+                body,
+            ))
+            for anchor in anchors:
+                scope = body[max(0, anchor.start() - 14000):anchor.end() + 1000]
+                states = re.findall(
+                    r'"(?:itempage)?availabilitystatus"\s*:\s*"([a-z_]+)"',
+                    scope,
+                )
+                if not states:
+                    continue
+                availability = states[-1]
+                if availability in {"out_of_stock", "not_available", "unavailable"}:
+                    status = Status.OUT_OF_STOCK
+                elif availability in {"in_stock", "available"}:
+                    is_preorder = bool(re.search(
+                        r'"preorder"\s*:\s*\{.{0,500}?"ispreorder"\s*:\s*true',
+                        scope,
+                        re.S,
+                    ))
+                    status = Status.PREORDER if is_preorder else Status.IN_STOCK
+                else:
+                    continue
+                return Result(
+                    status,
+                    f"Walmart item {product['item_id']} availabilityStatus={availability}",
+                    "walmart-product-state",
+                )
+
     if "gamestop.com" in product.get("url", ""):
         zero_preorders = re.search(r"\b0\s+item\(s\)\s+are available for pre-?order\b", body)
         unavailable_box = 'data-available="false"' in body
@@ -443,7 +600,8 @@ def check_product(product: dict) -> Result:
         if result and result.status not in (Status.ERROR, Status.UNKNOWN):
             return result
 
-    fetch_args = (product["url"], product.get("request_timeout"))
+    status_url = product.get("status_url", product["url"])
+    fetch_args = (status_url, product.get("request_timeout"))
     if "http_attempts" in product:
         body, http_status, note = fetch(*fetch_args, product["http_attempts"])
     else:
@@ -498,6 +656,22 @@ def check_product(product: dict) -> Result:
                     rendered.reason = (f"{rendered.reason} (overrides "
                                        f"{result.source} claiming {result.status.value})")
                     return rendered
+            # Best Buy's schema.org availability describes the product's
+            # catalog lifecycle, not necessarily whether its buy button is
+            # open.  Never send an alert unless the exact SKU fulfillment
+            # state above, or a rendered buy control, corroborates it.
+            if ("bestbuy.com" in product.get("url", "")
+                    and result.status in ALERTABLE):
+                return Result(
+                    Status.UNKNOWN,
+                    f"Best Buy {result.source} claims {result.status.value}, "
+                    "but the exact SKU fulfillment state was absent; refusing "
+                    "an unverified stock alert",
+                    "bestbuy-unverified",
+                    price=result.price,
+                    http_status=http_status,
+                    body_len=len(body),
+                )
             return result
 
     # Nothing structured in the HTML (Target). Render it properly.

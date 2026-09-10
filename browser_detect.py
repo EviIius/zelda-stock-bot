@@ -70,13 +70,16 @@ PROBE = r"""() => {
     || (b.getAttribute('data-test') || '').toLowerCase().includes('disabled')
     || String(b.className || '').toLowerCase().includes('disabled');
 
+  const buttonData = b => ({
+    dt: b.getAttribute('data-test') || b.getAttribute('data-automation-id') || '',
+    text: (b.innerText || b.value || b.getAttribute('aria-label') || b.title || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 120),
+    disabled: isDisabled(b),
+  });
+
   const btns = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')]
     .filter(b => !inChrome(b))
-    .map(b => ({
-      dt: b.getAttribute('data-test') || b.getAttribute('data-automation-id') || '',
-      text: (b.innerText || b.value || '').replace(/\s+/g, ' ').trim().slice(0, 60),
-      disabled: isDisabled(b),
-    }))
+    .map(buttonData)
     .filter(b => b.text || b.dt);
 
   const fulfil = [...document.querySelectorAll(
@@ -137,7 +140,6 @@ def _decide(probe: dict) -> Result:
 
     candidates = [b for b in buttons if BUY_TEXT.search(b["text"]) or BUY_TEXT.search(b["dt"])]
     live_buttons = [b for b in candidates if not b["disabled"]]
-
     # The fulfilment panel wins. A headless browser with no saved zip code
     # can render an enabled-looking control while nothing is actually
     # purchasable, which is exactly how the Target false positive happened.
@@ -184,18 +186,13 @@ _TLS = threading.local()
 
 def _launch(pw):
     """
-    Prefer the real Chrome install over Playwright's bundled Chromium.
+    Launch a headless browser for retailers whose page state requires it.
 
-    Walmart's bot detection fingerprints the bundled build and serves an
-    interstitial to it. Real Chrome, driven the same way, usually passes.
-    Falls back to Chromium when Chrome isn't installed.
+    Walmart and Best Buy explicitly opt out in config. This browser path is
+    currently used by Target, whose availability only exists in rendered DOM.
     """
-    # --disable-http2: Best Buy's edge terminates Chromium's HTTP/2 handshake
-    # with ERR_HTTP2_PROTOCOL_ERROR. Forcing HTTP/1.1 gets the page. It is
-    # almost certainly the same fault that makes plain `requests` hang until
-    # it times out rather than returning an error.
     args = ["--disable-blink-features=AutomationControlled", "--no-sandbox",
-            "--disable-dev-shm-usage", "--disable-http2"]
+            "--disable-dev-shm-usage"]
     try:
         return pw.chromium.launch(headless=True, channel="chrome", args=args), "chrome"
     except Exception:  # noqa: BLE001
@@ -270,20 +267,12 @@ BLOCK_MARKERS = ("pardon our interruption", "are you a human", "verify you are a
                  "cf-chl-")
 
 
-def probe_page(product: dict) -> dict | None:
-    """Render the page and return the raw probe. Used by --probe for debugging."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return None
-
-    cached = _session()
-    page = cached["page"]
-
+def _collect_probe(product: dict, page, flavour: str) -> dict:
+    """Navigate an open page and collect item controls plus rendered HTML."""
     nav_error = None
     for wait_until in ("domcontentloaded", "load", "commit"):
         try:
-            page.goto(product["url"], wait_until=wait_until,
+            page.goto(product.get("status_url", product["url"]), wait_until=wait_until,
                       timeout=config.BROWSER_TIMEOUT_MS)
             nav_error = None
             break
@@ -300,8 +289,6 @@ def probe_page(product: dict) -> dict | None:
     except Exception:  # noqa: BLE001
         probe = {"btns": [], "fulfil": []}
 
-    probe["_blocked"] = any(m in body for m in BLOCK_MARKERS)
-    probe["_browser"] = cached["flavour"]
     probe["_body"] = body
     try:
         probe["_html"] = page.content().lower()
@@ -309,9 +296,29 @@ def probe_page(product: dict) -> dict | None:
         probe["_html"] = ""
     probe["_title"] = page.title()
     probe["_final_url"] = page.url
+    title = probe["_title"].lower()
+    # Retailer pages sometimes carry challenge wording in scripts or hidden
+    # accessibility text. The actual challenge URL/title is authoritative.
+    probe["_blocked"] = (
+        "/blocked?" in probe["_final_url"].lower()
+        or any(marker in title for marker in BLOCK_MARKERS)
+        or (len(body) < 5000 and any(marker in body for marker in BLOCK_MARKERS))
+    )
+    probe["_browser"] = flavour
     probe["_nav_error"] = nav_error
     probe["_body_len"] = len(body)
     return probe
+
+
+def probe_page(product: dict) -> dict | None:
+    """Render the page and return the raw probe. Used by --probe for debugging."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    cached = _session()
+    return _collect_probe(product, cached["page"], cached["flavour"])
 
 
 def capture_buybox(product: dict) -> bytes | None:
@@ -367,10 +374,7 @@ def check(product: dict) -> Result | None:
         return Result(Status.OUT_OF_STOCK,
                       f"phrase {phrase!r} not on the rendered listing page yet", "browser")
 
-    # Structured data in the RENDERED html beats any DOM heuristic, and is
-    # the only thing that answers Walmart -- it ships no Product JSON-LD and
-    # renders no cart button at all when unavailable, but its app state says
-    # "availabilityStatus":"OUT_OF_STOCK" plainly.
+    # Structured data in the rendered HTML beats generic DOM heuristics.
     html = probe.get("_html") or ""
     dom = _decide(probe)
 
@@ -380,10 +384,8 @@ def check(product: dict) -> Result | None:
             if structured is None:
                 continue
             structured.source = "browser+" + structured.source
-            # The DOM is the tie-breaker for optimistic structured data:
-            # Best Buy advertises schema.org/InStock next to a disabled
-            # "Coming Soon" button. A disabled buy control is proof you
-            # cannot buy it, whatever the metadata says.
+            # The DOM is the tie-breaker for optimistic structured data. A
+            # disabled buy control is proof the item cannot be bought.
             if structured.status in detect.ALERTABLE and dom.status is Status.OUT_OF_STOCK:
                 dom.reason = (f"{dom.reason} (overrides {structured.source} "
                               f"claiming {structured.status.value})")

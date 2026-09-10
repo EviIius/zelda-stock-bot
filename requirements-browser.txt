@@ -1,4 +1,5 @@
-# Optional but strongly recommended for local runs.
-#   pip install -r requirements-browser.txt
-#   playwright install chromium
-playwright>=1.44
+# Required for rendered retailer checks.
+# Playwright 1.56+ dropped the Chromium build used by macOS 13. Windows and
+# newer non-Mac hosts can continue following the current release.
+playwright>=1.44,<1.56; sys_platform == "darwin"
+playwright>=1.44; sys_platform != "darwin"

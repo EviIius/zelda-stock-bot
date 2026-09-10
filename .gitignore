@@ -14,3 +14,4 @@ logs/
 .venv/
 .playwright-browsers/
 .zelda-stock-monitor.lock
+.DS_Store

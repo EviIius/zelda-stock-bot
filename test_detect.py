@@ -178,18 +178,16 @@ MIXED_FULFILMENT = {
     "fulfil": ["Pickup Not available Shipping Arrives by Oct 29"],
 }
 
-# Best Buy's Pro Controller page, captured live 2026-09-09: JSON-LD says
-# InStock, the only buy control is a disabled "Coming Soon".
-BESTBUY_OPTIMISTIC_METADATA = {
+# A disabled replacement control must be treated as unavailable.
+COMING_SOON_CONTROL = {
     "btns": [{"dt": "", "text": "Coming Soon", "disabled": True}],
     "fulfil": [],
 }
 
 BROWSER_CASES = [
     (
-        "REGRESSION: disabled 'Coming Soon' button -> out of stock "
-        "(must beat JSON-LD InStock)",
-        BESTBUY_OPTIMISTIC_METADATA,
+        "disabled 'Coming Soon' replacement control -> out of stock",
+        COMING_SOON_CONTROL,
         Status.OUT_OF_STOCK,
     ),
     (

@@ -237,12 +237,24 @@ class ReliabilityTests(unittest.TestCase):
     def test_controller_catalog_has_all_verified_retailers(self):
         controllers = {p["name"]: p for p in config.PRODUCTS
                        if p.get("group") == "controller"}
-        self.assertEqual(set(controllers), {"Target", "GameStop", "Nintendo Store", "Best Buy"})
+        self.assertEqual(
+            set(controllers), {"Target", "Walmart", "GameStop", "Nintendo Store", "Best Buy"}
+        )
         self.assertEqual(controllers["Best Buy"]["sku"], "6691849")
         self.assertEqual(controllers["Target"]["tcin"], "1013213521")
+        self.assertEqual(controllers["Walmart"]["item_id"], "20954470204")
         self.assertEqual(controllers["Best Buy"]["url"].count("https://"), 1)
+        self.assertIn("6691849", controllers["Best Buy"]["status_url"])
         self.assertEqual(controllers["Best Buy"]["http_attempts"], 0)
         self.assertFalse(controllers["Best Buy"]["use_browser"])
+        self.assertFalse(controllers["Walmart"]["use_browser"])
+
+    def test_all_primary_retailers_enabled_for_both_product_groups(self):
+        expected = {"Target", "Walmart", "GameStop", "Nintendo Store", "Best Buy"}
+        for group in ("console", "controller"):
+            products = [p for p in config.PRODUCTS if p.get("group") == group]
+            enabled = {p["name"] for p in products if p["enabled"]}
+            self.assertTrue(expected <= enabled, f"{group} missing {expected - enabled}")
 
     def test_zero_http_attempts_fail_fast_after_tls_failure(self):
         tls = mock.Mock()
@@ -253,6 +265,25 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIsNone(body)
         self.assertIsNone(status)
         self.assertIn("blocked", note)
+        plain.assert_not_called()
+
+    def test_walmart_retries_http_tls_profile_after_bot_wall(self):
+        blocked = mock.Mock(status_code=200, text="Robot or human")
+        full_page = mock.Mock(
+            status_code=200,
+            text='{"availabilityStatus":"OUT_OF_STOCK"}' + ("x" * 6000),
+        )
+        tls = mock.Mock()
+        tls.get.side_effect = [blocked, full_page]
+        with mock.patch.object(detect, "curl_requests", tls), \
+             mock.patch.object(detect._session, "get") as plain:
+            body, status, note = detect.fetch(
+                "https://www.walmart.com/ip/20954470204", timeout=1, attempts=0
+            )
+        self.assertIn("out_of_stock", body.lower())
+        self.assertEqual(status, 200)
+        self.assertIn("chrome_android", note)
+        self.assertEqual(tls.get.call_count, 2)
         plain.assert_not_called()
 
     def test_macos_installer_builds_a_boot_daemon_without_embedded_secrets(self):
@@ -266,12 +297,35 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("/Library/LaunchDaemons", installer)
         self.assertIn('"RunAtLoad": True', installer)
         self.assertIn('"KeepAlive": True', installer)
+        self.assertIn('"ProcessType": "Background"', installer)
         self.assertIn('"UserName": os.environ["ZSB_USER"]', installer)
+        self.assertNotIn("LimitLoadToSessionType", installer)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH", installer)
         self.assertIn("SERVICE_LOG_MAX_BYTES", installer)
+        self.assertIn("-m unittest discover", installer)
         self.assertIn("--test-alert", installer)
         self.assertIn("launchctl kickstart", helper)
         self.assertNotRegex(installer, r"discord(?:app)?\.com/api/webhooks/\d+/")
+
+    def test_windows_installer_provisions_browser_dependencies(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "install_windows_tasks.ps1"),
+                  encoding="utf-8") as handle:
+            installer = handle.read()
+        self.assertIn('requirements.txt', installer)
+        self.assertIn('requirements-browser.txt', installer)
+        self.assertIn('-m playwright install chromium', installer)
+        self.assertIn('-m unittest discover', installer)
+        self.assertIn('sys.version_info < (3, 11)', installer)
+
+    def test_walmart_and_bestbuy_never_launch_a_browser(self):
+        http_only = [p for p in config.PRODUCTS if p["name"] in {"Walmart", "Best Buy"}]
+        self.assertEqual(len(http_only), 4)
+        self.assertTrue(all(p.get("use_browser") is False for p in http_only))
+        self.assertTrue(all("fresh_headful_browser" not in p for p in http_only))
+        walmart = [p for p in http_only if p["name"] == "Walmart"]
+        self.assertTrue(all(p.get("status_url", "").startswith(
+            "https://www.walmart.com/search?q=") for p in walmart))
 
     def test_service_logging_writes_to_bounded_log(self):
         path = os.path.join(self.tmp.name, "service.log")
@@ -312,6 +366,106 @@ class ReliabilityTests(unittest.TestCase):
         )
         self.assertIs(result.status, Status.OUT_OF_STOCK)
         self.assertEqual(result.price, "$99.99")
+
+    def test_bestbuy_coming_soon_overrides_stale_jsonld(self):
+        body = '''
+        <script type="application/ld+json">
+        {"@type":"Product","offers":{"@type":"Offer","price":"99.99",
+         "availability":"https://schema.org/InStock"}}
+        </script>
+        {"skuid":"6691849","fulfillmentoptions":{"buttonstates":[
+          {"buttonstate":"coming_soon","displaytext":"coming soon"}
+        ]}}
+        '''
+        result = detect._retailer_consistency_guard(
+            {"url": "https://www.bestbuy.com/product/item", "sku": "6691849"},
+            body.lower(),
+        )
+        self.assertIs(result.status, Status.OUT_OF_STOCK)
+        self.assertEqual(result.source, "bestbuy-product-state")
+        self.assertIn("coming_soon", result.reason)
+        self.assertEqual(result.price, "$99.99")
+
+    def test_bestbuy_server_rendered_exact_sku_button(self):
+        body = '''
+        <button class="add-to-cart-button" disabled
+          data-sku-id="6691841" data-button-state="coming_soon">
+          Coming Soon
+        </button>
+        <button data-sku-id="other-sku" data-button-state="add_to_cart">
+          Add to Cart
+        </button>
+        '''
+        result = detect._retailer_consistency_guard(
+            {"url": "https://www.bestbuy.com/product/item", "sku": "6691841"},
+            body.lower(),
+        )
+        self.assertIs(result.status, Status.OUT_OF_STOCK)
+        self.assertEqual(result.source, "bestbuy-product-button")
+
+    def test_bestbuy_exact_sku_see_details_is_not_buyable(self):
+        body = '''
+        <a role="button" data-sku-id="6691841"
+          data-button-state="see_details" href="/product/item">
+          See details
+        </a>
+        '''
+        result = detect._retailer_consistency_guard(
+            {"url": "https://www.bestbuy.com/product/item", "sku": "6691841"},
+            body.lower(),
+        )
+        self.assertIs(result.status, Status.OUT_OF_STOCK)
+        self.assertEqual(result.source, "bestbuy-product-button")
+
+    def test_walmart_item_scoped_state_ignores_recommendations(self):
+        body = '''
+        {"availabilityStatus":"IN_STOCK",
+         "canonicalUrl":"/ip/recommended-controller/111111"}
+        {"availabilityStatus":"OUT_OF_STOCK",
+         "preorder":{"isPreorder":true},
+         "canonicalUrl":"/ip/zelda-controller/20954470204",
+         "usItemId":"20954470204"}
+        '''
+        result = detect._retailer_consistency_guard(
+            {"url": "https://www.walmart.com/ip/20954470204", "item_id": "20954470204"},
+            body.lower(),
+        )
+        self.assertIs(result.status, Status.OUT_OF_STOCK)
+        self.assertEqual(result.source, "walmart-product-state")
+
+    def test_bestbuy_guard_uses_only_requested_skus_button_state(self):
+        body = '''
+        {"skuid":"other-sku","fulfillmentoptions":{"buttonstates":[
+          {"buttonstate":"coming_soon"}
+        ]}}
+        {"skuid":"6691849","fulfillmentoptions":{"buttonstates":[
+          {"buttonstate":"add_to_cart"}
+        ]}}
+        '''
+        result = detect._retailer_consistency_guard(
+            {"url": "https://www.bestbuy.com/product/item", "sku": "6691849"},
+            body.lower(),
+        )
+        self.assertIs(result.status, Status.IN_STOCK)
+        self.assertEqual(result.source, "bestbuy-product-state")
+        self.assertIn("add_to_cart", result.reason)
+
+    def test_bestbuy_stale_jsonld_without_sku_state_fails_closed(self):
+        body = '''
+        <script type="application/ld+json">
+        {"@type":"Product","offers":{"@type":"Offer","price":"519.99",
+         "availability":"https://schema.org/InStock"}}
+        </script>
+        ''' + ("x" * 6000)
+        product = {
+            "url": "https://www.bestbuy.com/product/item",
+            "sku": "6691841",
+            "use_browser": False,
+        }
+        with mock.patch.object(detect, "fetch", return_value=(body.lower(), 200, "ok")):
+            result = detect.check_product(product)
+        self.assertIs(result.status, Status.UNKNOWN)
+        self.assertEqual(result.source, "bestbuy-unverified")
 
 
 if __name__ == "__main__":

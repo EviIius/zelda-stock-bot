@@ -96,13 +96,20 @@ PRODUCTS = [
         "product_name": "Nintendo Switch 2 — Zelda 40th Anniversary Console",
         "group": "console",
         "url": "https://www.walmart.com/ip/Nintendo-Switch-2-The-Legend-of-Zelda-40th-Anniversary-Edition/21002656445",
+        # The exact-ID search response carries the same item-scoped inventory
+        # state and is less aggressively challenged than the product page.
+        "status_url": "https://www.walmart.com/search?q=21002656445",
         "kind": "product",
         "item_id": "21002656445",
         "cart_url": "https://affil.walmart.com/cart/addToCart?items=21002656445",
-        # Walmart has returned only bot walls from this connection. Keep it
-        # out of the time-critical lane unless explicitly re-enabled.
-        "enabled": _bool("ENABLE_WALMART", False),
-        "interval": _int("WALMART_INTERVAL", 600),
+        # Keep Walmart HTTP-only. If it challenges these exact-item requests,
+        # fail closed instead of opening a visible browser or guessing from
+        # recommendation inventory.
+        "request_timeout": 12,
+        "http_attempts": 0,
+        "use_browser": False,
+        "enabled": _bool("ENABLE_WALMART", True),
+        "interval": _int("WALMART_INTERVAL", 60),
     },
     {
         "key": "bestbuy",
@@ -110,11 +117,18 @@ PRODUCTS = [
         "product_name": "Nintendo Switch 2 — Zelda 40th Anniversary Console",
         "group": "console",
         "url": "https://www.bestbuy.com/product/switch-2-the-legend-of-zelda-40th-anniversary-edition/J7GSL57HTY",
+        # Best Buy's full PDP intermittently resets HTTP/2. Its official Q&A
+        # page server-renders the same exact-SKU fulfillment button.
+        "status_url": "https://www.bestbuy.com/site/questions/switch-2-the-legend-of-"
+                      "zelda-40th-anniversary-edition/6691841",
         "kind": "product",
         "sku": "6691841",
         "cart_url": "https://api.bestbuy.com/click/-/6691841/cart",
-        "enabled": _bool("ENABLE_BESTBUY", False),
-        "interval": _int("BESTBUY_INTERVAL", 600),
+        "request_timeout": 8,
+        "http_attempts": 0,
+        "use_browser": False,
+        "enabled": _bool("ENABLE_BESTBUY", True),
+        "interval": _int("BESTBUY_INTERVAL", 60),
     },
     {
         "key": "gamestop",
@@ -166,6 +180,22 @@ PRODUCTS = [
         "interval": _int("CONTROLLER_TARGET_INTERVAL", 25),
     },
     {
+        "key": "controller_walmart",
+        "name": "Walmart",
+        "product_name": "Zelda 40th Anniversary Switch 2 Pro Controller",
+        "group": "controller",
+        "url": "https://www.walmart.com/ip/20954470204",
+        "status_url": "https://www.walmart.com/search?q=20954470204",
+        "kind": "product",
+        "item_id": "20954470204",
+        "cart_url": "https://affil.walmart.com/cart/addToCart?items=20954470204",
+        "request_timeout": 12,
+        "http_attempts": 0,
+        "use_browser": False,
+        "enabled": _bool("ENABLE_CONTROLLER_WALMART", True),
+        "interval": _int("CONTROLLER_WALMART_INTERVAL", 60),
+    },
+    {
         "key": "controller_gamestop",
         "name": "GameStop",
         "product_name": "Zelda 40th Anniversary Switch 2 Pro Controller",
@@ -197,13 +227,15 @@ PRODUCTS = [
         "group": "controller",
         "url": "https://www.bestbuy.com/product/nintendo-switch-2-pro-controller-the-legend-"
                "of-zelda-40th-anniversary-edition-multi/J7GSL57W27",
+        "status_url": "https://www.bestbuy.com/site/questions/nintendo-switch-2-pro-controller-"
+                      "the-legend-of-zelda-40th-anniversary-edition-multi/6691849",
         "kind": "product",
         "sku": "6691849",
         "cart_url": "https://api.bestbuy.com/click/-/6691849/cart",
         "request_timeout": 8,
-        # Best Buy stalls both plain HTTP and Playwright on this connection.
-        # Keep the fast browser-TLS attempt, then report degraded instead of
-        # leaving a Chromium worker hung for several minutes.
+        # Best Buy stalls some plain HTTP clients on this connection. Keep the
+        # fast HTTP TLS-profile attempt, then report degraded without launching
+        # Chromium.
         "http_attempts": 0,
         "use_browser": False,
         "enabled": _bool("ENABLE_CONTROLLER_BESTBUY", True),
