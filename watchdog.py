@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import subprocess
@@ -15,18 +16,35 @@ import notify
 WINDOWS_MONITOR_TASK = "Zelda Stock Monitor"
 
 
+def _pid_exists(pid: int | None) -> bool:
+    if not pid or os.name != "nt":
+        return False
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
 def _restart_windows_monitor() -> tuple[bool, str]:
     """Restart the directly managed Windows task after a stale heartbeat."""
     if os.name != "nt":
         return False, "automatic restart is only configured on Windows"
     schtasks = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                             "System32", "schtasks.exe")
+    heartbeat = _load(config.RUNTIME_HEARTBEAT_FILE)
+    old_pid = int(heartbeat.get("pid", 0) or 0)
     subprocess.run(
         [schtasks, "/End", "/TN", WINDOWS_MONITOR_TASK],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         timeout=20, check=False,
     )
-    time.sleep(1)
+    deadline = time.monotonic() + 15
+    while _pid_exists(old_pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if _pid_exists(old_pid):
+        return False, "old Windows monitor did not exit; duplicate-safe restart cancelled"
+    time.sleep(0.4)
     started = subprocess.run(
         [schtasks, "/Run", "/TN", WINDOWS_MONITOR_TASK],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

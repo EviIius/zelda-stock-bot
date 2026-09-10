@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import json
 import os
 import subprocess
@@ -69,6 +70,23 @@ def _heartbeat() -> tuple[int | None, float | None]:
         return None, None
 
 
+def _pid_exists(pid: int | None) -> bool:
+    if not pid or os.name != "nt":
+        return False
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def _wait_for_pid_exit(pid: int | None, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while _pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return not _pid_exists(pid)
+
+
 def _change_task(task_name: str, enabled: bool) -> None:
     result = _run_task_command("/Change", "/TN", task_name,
                                "/ENABLE" if enabled else "/DISABLE")
@@ -89,18 +107,24 @@ def start_bot() -> str:
 def stop_bot() -> str:
     # Disable first so neither the watchdog nor the logon trigger can undo a
     # deliberate stop. Ending a task that is already idle is harmless.
+    old_pid, _ = _heartbeat()
     _change_task(WATCHDOG_TASK, False)
     _change_task(MONITOR_TASK, False)
     _run_task_command("/End", "/TN", WATCHDOG_TASK)
     _run_task_command("/End", "/TN", MONITOR_TASK)
+    if not _wait_for_pid_exit(old_pid):
+        raise RuntimeError("The monitor did not exit within 15 seconds; it was not restarted.")
     return "Bot stopped; monitor and watchdog are disabled."
 
 
 def restart_bot() -> str:
+    old_pid, _ = _heartbeat()
     _change_task(MONITOR_TASK, True)
     _change_task(WATCHDOG_TASK, True)
     _run_task_command("/End", "/TN", MONITOR_TASK)
-    time.sleep(0.7)
+    if not _wait_for_pid_exit(old_pid):
+        raise RuntimeError("The old monitor did not exit within 15 seconds; restart cancelled.")
+    time.sleep(0.4)  # allow the named single-instance mutex to be released
     result = _run_task_command("/Run", "/TN", MONITOR_TASK)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout).strip() or "Restart failed")

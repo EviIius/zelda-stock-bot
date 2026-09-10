@@ -340,6 +340,7 @@ class ReliabilityTests(unittest.TestCase):
         self.assertLess(stop_body.index("WATCHDOG_TASK, False"),
                         stop_body.index('"/End", "/TN", MONITOR_TASK'))
         self.assertIn("CREATE_NO_WINDOW", panel)
+        self.assertIn("_wait_for_pid_exit(old_pid)", panel)
         self.assertIn("Live retailer feed", panel)
         self.assertIn("Add link", panel)
         self.assertIn("product_catalog.save_custom_products", panel)
