@@ -33,6 +33,11 @@ from enum import Enum
 
 import requests
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:  # optional TLS-browser impersonation fallback
+    curl_requests = None
+
 import config
 
 
@@ -101,20 +106,58 @@ BOT_WALL = (
     "enable javascript and cookies to continue",
     "access to this page has been denied",
     "activity on this site has been disabled",
+    "attention required!",
+    "cloudflare ray id",
+    "cf-chl-",
 )
 
 _session = requests.Session()
 
+DNS_FAILURE_MARKERS = (
+    "could not resolve host",
+    "failed to resolve",
+    "getaddrinfo failed",
+    "name or service not known",
+    "nameresolutionerror",
+    "temporary failure in name resolution",
+)
 
-def fetch(url: str, timeout: int | None = None) -> tuple[str | None, int | None, str]:
+
+def _dns_failed(note: str) -> bool:
+    lowered = note.lower()
+    return any(marker in lowered for marker in DNS_FAILURE_MARKERS)
+
+
+def fetch(url: str, timeout: int | None = None,
+          attempts: int | None = None) -> tuple[str | None, int | None, str]:
     """Return (lowercased_body, http_status, note). body is None on failure."""
     timeout = timeout or config.REQUEST_TIMEOUT
     last_note = "no attempt made"
 
+    # Cloudflare increasingly rejects Python/OpenSSL before page content is
+    # considered. curl_cffi presents a current browser TLS fingerprint and is
+    # dramatically faster than launching a browser when the page is public.
+    if curl_requests is not None:
+        try:
+            resp = curl_requests.get(url, impersonate="chrome", timeout=timeout,
+                                     headers={"Accept-Language": "en-US,en;q=0.9"})
+            if resp.status_code < 400:
+                return resp.text.lower(), resp.status_code, "ok (browser TLS)"
+            last_note = f"HTTP {resp.status_code} via browser TLS"
+        except Exception as exc:  # noqa: BLE001
+            last_note = f"browser TLS {type(exc).__name__}: {exc}"
+            # A second HTTP stack and a browser cannot repair a system DNS
+            # outage. Return promptly so the worker keeps a useful cadence.
+            if _dns_failed(last_note):
+                return None, None, last_note
+
     # Best Buy stalls plain HTTP clients rather than refusing them, so three
     # 20-second retries burned ~60s -- longer than the whole check interval.
     # When a browser can rescue the check anyway, don't grind through them.
-    attempts = min(2, config.MAX_RETRIES) if config.USE_BROWSER else config.MAX_RETRIES
+    if attempts is None:
+        attempts = min(2, config.MAX_RETRIES) if config.USE_BROWSER else config.MAX_RETRIES
+    else:
+        attempts = max(0, int(attempts))
 
     for attempt in range(1, attempts + 1):
         headers = dict(BASE_HEADERS)
@@ -123,6 +166,8 @@ def fetch(url: str, timeout: int | None = None) -> tuple[str | None, int | None,
             resp = _session.get(url, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
             last_note = f"{type(exc).__name__}: {exc}"
+            if _dns_failed(last_note):
+                break
         else:
             if resp.status_code in (403, 429, 503):
                 last_note = f"HTTP {resp.status_code} (likely bot protection)"
@@ -359,7 +404,7 @@ def _phrases(body: str) -> Result:
 # ---------------------------------------------------------------------------
 def _browser_check(product: dict) -> Result | None:
     """Returns whatever the browser concluded, including failures."""
-    if not config.USE_BROWSER:
+    if not config.USE_BROWSER or product.get("use_browser") is False:
         return None
     try:
         import browser_detect
@@ -372,6 +417,22 @@ def _decisive(result: Result | None) -> bool:
     return result is not None and result.status not in (Status.ERROR, Status.UNKNOWN)
 
 
+def _retailer_consistency_guard(product: dict, body: str) -> Result | None:
+    """Let explicit product-page inventory override known-stale metadata."""
+    if "gamestop.com" in product.get("url", ""):
+        zero_preorders = re.search(r"\b0\s+item\(s\)\s+are available for pre-?order\b", body)
+        unavailable_box = 'data-available="false"' in body
+        if zero_preorders and unavailable_box:
+            structured = _jsonld(body)
+            return Result(
+                Status.OUT_OF_STOCK,
+                "GameStop product inventory explicitly reports 0 items available for pre-order",
+                "gamestop-inventory",
+                price=structured.price if structured else None,
+            )
+    return None
+
+
 def check_product(product: dict) -> Result:
     if product.get("sku"):
         result = _bestbuy_api(product["sku"])
@@ -382,7 +443,16 @@ def check_product(product: dict) -> Result:
         if result and result.status not in (Status.ERROR, Status.UNKNOWN):
             return result
 
-    body, http_status, note = fetch(product["url"])
+    fetch_args = (product["url"], product.get("request_timeout"))
+    if "http_attempts" in product:
+        body, http_status, note = fetch(*fetch_args, product["http_attempts"])
+    else:
+        body, http_status, note = fetch(*fetch_args)
+
+    # Avoid an expensive rendered-browser attempt when the host could not be
+    # resolved at all. That condition is a network error, not bot protection.
+    if body is None and _dns_failed(note):
+        return Result(Status.ERROR, note, "fetch", http_status=http_status)
 
     # Blocked or unfetchable: a rendered browser sometimes gets through
     # where a bare HTTP request does not, so it's worth one attempt.
@@ -404,6 +474,11 @@ def check_product(product: dict) -> Result:
         status = Status.BLOCKED if (body is not None or "bot protection" in note) else Status.ERROR
         return Result(status, http_reason, "fetch", http_status=http_status)
 
+    guarded = _retailer_consistency_guard(product, body)
+    if guarded is not None:
+        guarded.http_status, guarded.body_len = http_status, len(body)
+        return guarded
+
     # Structured signals in the fetched HTML are cheapest and most reliable
     # -- GameStop, for instance, ships schema.org availability in its raw
     # HTML, so there is no reason to spend seconds rendering it.
@@ -411,6 +486,18 @@ def check_product(product: dict) -> Result:
         result = layer(body)
         if result is not None:
             result.http_status, result.body_len = http_status, len(body)
+            # Structured data can be optimistic. Best Buy's Pro Controller
+            # page ships "availability":"https://schema.org/InStock" while
+            # the only buy control reads "Coming Soon" and is disabled --
+            # InStock there means "we will sell this", not "buyable now".
+            # So a positive claim gets checked against the rendered DOM;
+            # a negative one is trusted as-is.
+            if result.status in ALERTABLE and config.USE_BROWSER:
+                rendered = _browser_check(product)
+                if rendered is not None and rendered.status is Status.OUT_OF_STOCK:
+                    rendered.reason = (f"{rendered.reason} (overrides "
+                                       f"{result.source} claiming {result.status.value})")
+                    return rendered
             return result
 
     # Nothing structured in the HTML (Target). Render it properly.

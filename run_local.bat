@@ -6,7 +6,8 @@ REM  There is nothing to edit in this file.
 REM
 REM  Put your Discord webhook in a file called ".env" next to this one:
 REM
-REM      DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/abc
+REM      DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
+REM      CONTROLLER_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
 REM
 REM  Copy .env.example to .env to get started. Then double-click this
 REM  file. Leave the window open - closing it stops the monitor.
@@ -66,5 +67,5 @@ echo.
 echo   Test alert sent. Starting the monitor - leave this window open.
 echo   Press Ctrl+C to stop.
 echo.
-python stock_monitor.py --loop --interval 45
+python stock_monitor.py --loop
 pause

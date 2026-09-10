@@ -6,9 +6,6 @@ on:
       duration:
         description: "Seconds to keep looping before the job exits"
         default: "3300"
-      interval:
-        description: "Seconds between checks"
-        default: "60"
   schedule:
     # Safety net. GitHub's scheduler is best-effort and routinely runs late,
     # so this is not "a check every 5 minutes" -- it's "restart the long
@@ -35,7 +32,9 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - run: pip install -r requirements.txt
+      - run: |
+          pip install -r requirements.txt -r requirements-browser.txt
+          playwright install --with-deps chromium
 
       # State lives in the Actions cache rather than in git, so the repo
       # doesn't accumulate a commit every hour and two overlapping runs
@@ -50,6 +49,7 @@ jobs:
       - name: Monitor
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CONTROLLER_DISCORD_WEBHOOK_URL: ${{ secrets.CONTROLLER_DISCORD_WEBHOOK_URL }}
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}
@@ -60,8 +60,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python stock_monitor.py --loop \
-            --duration "${{ github.event.inputs.duration || '3300' }}" \
-            --interval "${{ github.event.inputs.interval || '60' }}"
+            --duration "${{ github.event.inputs.duration || '3300' }}"
 
       - name: Save state
         if: always()

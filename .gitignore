@@ -4,3 +4,13 @@ __pycache__/
 *.pyc
 .env
 checks.csv
+notification_outbox.json
+notification_outbox.json.tmp
+runtime_heartbeat.json
+runtime_heartbeat.json.tmp
+watchdog_state.json
+watchdog_state.json.tmp
+logs/
+.venv/
+.playwright-browsers/
+.zelda-stock-monitor.lock

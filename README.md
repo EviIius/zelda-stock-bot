@@ -1,10 +1,73 @@
-# Zelda Switch 2 Stock Monitor
+# Zelda Switch 2 Console + Controller Stock Monitor
 
-Watches Target, Walmart, Best Buy, GameStop, the Nintendo Store and Costco
-for the **Nintendo Switch 2 — The Legend of Zelda 40th Anniversary Edition**
-(Best Buy SKU `6691841`, $519.99, release 10/29/2026) and pushes an alert
-the moment it becomes buyable — in stock *or* a pre-order window
-reopening.
+Watches the **Nintendo Switch 2 — The Legend of Zelda 40th Anniversary
+Edition console** ($519.99) and matching **Switch 2 Pro Controller** ($99.99),
+both releasing 10/29/2026. An alert goes out the moment either becomes
+buyable — in stock *or* a pre-order window reopening.
+
+Target, GameStop and Nintendo run as independent 25-second workers for each
+item. The controller's Best Buy page runs a fast browser-TLS check independently
+every 60 seconds and skips its known multi-minute browser stall, so its bot wall
+cannot delay the other six workers. Walmart, console
+Best Buy and Costco remain disabled by default and can be enabled separately.
+
+Console and controller channels each get their own quiet live-status message,
+refreshed every minute with the age and latency of every check. Availability
+creates a clearly labeled `@here` alert with a prominent product/cart link;
+confirmation and screenshots happen afterward. Failed deliveries are persisted
+in `notification_outbox.json` and retried.
+
+## Install on an always-on Mac
+
+An old Mac on your home internet is the preferred unattended host. It keeps the
+residential network path used by the retailer checks and does not depend on your
+Windows laptop being powered on.
+
+Open Terminal on the Mac and run:
+
+```bash
+cd "$HOME"
+git clone https://github.com/EviIius/zelda-stock-bot.git
+cd zelda-stock-bot
+./install_macos_service.sh
+```
+
+The installer finds Python 3.11+, creates an isolated `.venv`, installs
+Playwright and Chromium into the repository, securely prompts for the console
+and controller Discord webhooks, sends a test to each channel, and installs
+`com.eviiius.zelda-stock-monitor` as a system `launchd` daemon. The daemon:
+
+- starts automatically at boot, even before login;
+- runs as the user who installed it rather than as root;
+- restarts automatically after a crash;
+- prevents idle sleep while healthy, without permanently changing power settings;
+- writes timestamped output to a 5 MB rotating log under `logs/` (five backups); and
+- uses a process lock to prevent duplicate monitors.
+
+The Mac must remain powered and connected to the internet. A MacBook must also
+remain open; macOS still sleeps when its lid is closed. Clone directly under
+your home folder as shown above—Documents, Desktop, and Downloads have macOS
+privacy restrictions that can block boot services.
+
+Useful commands after installation:
+
+```bash
+./macos_service.sh status
+./macos_service.sh logs
+./macos_service.sh restart
+./macos_service.sh test
+```
+
+To stop or completely unregister the daemon:
+
+```bash
+./macos_service.sh stop
+./macos_service.sh uninstall
+```
+
+Uninstalling preserves `.env`, logs, state, and the virtual environment. Never
+copy `.env` into Git or send its contents to anyone; the installer creates it
+with user-only permissions.
 
 ---
 
@@ -49,10 +112,10 @@ trustworthy one:
 
 | Layer | Signal | Reliability |
 |---|---|---|
-| 1 | Rendered DOM via Playwright (`browser_detect.py`) | Definitive |
-| 2 | Official retailer API (Best Buy; Target with a key) | Definitive |
-| 3 | `schema.org` JSON-LD `offers.availability` | High |
-| 4 | Embedded app state (`__NEXT_DATA__`) | Good |
+| 1 | Official retailer API (when configured) | Definitive |
+| 2 | `schema.org` JSON-LD `offers.availability` | High |
+| 3 | Embedded app state (`__NEXT_DATA__`) | Good |
+| 4 | Rendered DOM via a persistent Playwright browser | Definitive |
 | 5 | Scoped page-text phrases | Negative evidence only |
 
 **Layer 5 can never report "in stock".** It may say "definitely not
@@ -124,11 +187,15 @@ account.
 
 It looks like `https://discord.com/api/webhooks/123.../abc...`.
 
+For clean separation, repeat steps 2–3 with a `controller-alerts` channel and
+save its URL as `CONTROLLER_DISCORD_WEBHOOK_URL`. If that second URL is ever
+missing, controller alerts fall back to the main webhook rather than vanish.
+
 **Treat that URL like a password** — anyone who has it can post into your
 channel. Don't commit it, and don't paste it into a screenshot or a chat.
 If it ever leaks, delete the webhook in Discord and create a new one;
-that instantly invalidates the old URL. `.env` and `stock_state.json` are
-gitignored so they can't be committed by accident.
+that instantly invalidates the old URL. `.env`, runtime state, delivery queues,
+heartbeats and logs are gitignored so they can't be committed by accident.
 
 *Webhooks are a desktop/browser feature. On mobile, use the browser
 version of Discord to do this part.*
@@ -177,6 +244,7 @@ your webhook after the `=`:
 
 ```
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123.../abc...
+CONTROLLER_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/456.../def...
 ```
 
 Then double-click `run_local.bat`. There is nothing to edit in the `.bat`
@@ -192,10 +260,12 @@ confusing error. `.env` has none of those rules. It's also gitignored, so
 your webhook can't be committed by accident.
 
 On GitHub Actions — **Settings → Secrets and variables → Actions → New
-repository secret**, name `DISCORD_WEBHOOK_URL`, paste the URL. Then
+repository secret**, add `DISCORD_WEBHOOK_URL` and
+`CONTROLLER_DISCORD_WEBHOOK_URL`. Then
 **Actions** tab → enable workflows → **Stock Monitor** → **Run workflow**.
 
-Running both at once is fine and recommended; the alerts are independent.
+Running both at once is supported, though the supervised local service below
+is the primary monitor.
 
 ---
 
@@ -206,10 +276,11 @@ Best Buy block those hard.** You will likely see `blocked` for those three
 from Actions while the exact same code works fine from your house. Two
 consequences:
 
-**Run it on your PC too.** Fill in the webhook in `run_local.bat` and
-double-click it. Your residential IP is treated as a normal shopper. This
-is the more reliable of the two — its only weakness is that your PC has to
-be awake. Running both at once is fine; the alerts are independent.
+**Run it locally too.** On Windows, use the supervised task below. On macOS,
+use `install_macos_service.sh`. A home connection is generally more reliable
+than a cloud datacenter for retailer pages; whichever machine hosts it must be
+awake and online. Running the cloud fallback too is fine because delivery state
+is independent.
 
 **If you keep the repo private, watch your Actions minutes.** GitHub Free
 gives 2,000 minutes/month for private repos. Continuous monitoring burns
@@ -221,8 +292,20 @@ about 44,000. You'd hit the cap in roughly a day and a half. Options:
 - **Keep it private and rely mainly on `run_local.bat`**, using Actions
   only as a backup.
 
-To run local monitoring in the background at startup, point Windows Task
-Scheduler at `run_local.bat` with trigger "At log on".
+### Install the supervised Windows service
+
+Run this once from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_windows_tasks.ps1
+```
+
+This installs two hidden scheduled tasks. `Zelda Stock Monitor` starts at logon
+and restarts after failures; `Zelda Stock Monitor Watchdog` runs independently
+every two minutes and alerts if the monitor heartbeat is stale. Service logs are
+retained for 14 days under `logs/`. The launcher removes a validated orphaned
+monitor process on restart, and a Windows mutex prevents duplicate local loops
+from producing duplicate alerts.
 
 ---
 
@@ -244,7 +327,7 @@ address it activates with no code changes. Until then Best Buy falls back
 to JSON-LD parsing, which works fine from a residential IP and is
 unreliable from GitHub Actions.
 
-**Social feed watching** (already on) — see below.
+**Social feed watching** (optional) — set `ENABLE_FEED_WATCH=1`; see below.
 
 **Email-to-SMS** — still supported via the original four secrets, but it's
 now a backup channel, not the primary. Gateway delivery runs 30 seconds to
@@ -272,10 +355,11 @@ structure moved and the phrase layer is correctly declining to guess.
 This bot fired two false "IN STOCK" alerts during development. Everything
 below exists because of that.
 
-**Confirm before alerting.** Any positive reading is re-checked a few
-seconds later and the alert only fires if both agree. The gate can only
-suppress an alert, never create one — a real restock is still there six
-seconds later, a rendering artefact isn't. `CONFIRM_BEFORE_ALERT=0` disables it.
+**Alert first, confirm second.** A strong positive reading sends the urgent
+alert immediately. A second check and screenshot happen afterward, followed by
+either a quiet confirmation or a correction. This preserves the seconds that
+matter without pretending one transient page state is certain.
+`CONFIRM_BEFORE_ALERT=0` skips the follow-up check.
 
 **Screenshots.** Stock alerts carry a picture of the actual buy box, so you
 can judge it yourself in one glance rather than trusting a verdict.
@@ -291,11 +375,15 @@ panel, and the reasoning:
 ```
 python stock_monitor.py --probe target
 python stock_monitor.py --probe bestbuy
+python stock_monitor.py --probe controller_target
+python stock_monitor.py --probe controller_bestbuy
 ```
 
 ## Daily check-in
 
-Once a day between 8am and 11am local, the bot posts a quiet summary. It
+Each Discord channel's editable live-status message refreshes every minute. In
+addition, once a day between 8am and 11am local, the bot posts a separate quiet
+console/controller summary. It
 reports the *current* reading and says plainly when that's stale — e.g.
 `❓ unknown (last known: in_stock, last read 2h ago)` — because a check-in
 that silently shows a days-old status is worse than none.
@@ -311,7 +399,7 @@ catches the soft ones.
 
 | Retailer | Resolved by | Notes |
 |---|---|---|
-| GameStop | JSON-LD in raw HTML | Cleanest of the lot; plain HTTP is enough |
+| GameStop | Browser-TLS HTTP + JSON-LD | Avoids intermittent Cloudflare blocks without launching Chrome |
 | Target | Rendered DOM only | Needs Playwright — HTML carries no availability at all |
 | Walmart | Rendered DOM / blocked | Aggressive bot detection; local IP required |
 | Best Buy | JSON-LD, or the API | API needs a non-free email address (unavailable) |
@@ -320,13 +408,15 @@ catches the soft ones.
 
 ## Tuning
 
-Everything is in `config.py` or environment variables: `CHECK_INTERVAL`
-(default 60s), `JITTER`, `REALERT_MINUTES` (default 20 — it keeps
+Everything is in `config.py` or environment variables: `TARGET_INTERVAL`,
+`GAMESTOP_INTERVAL`, `NINTENDO_INTERVAL`, the corresponding
+`CONTROLLER_*_INTERVAL` values, `JITTER`,
+`REALERT_MINUTES` (default 20 — it keeps
 reminding you while the item stays buyable, so one missed notification
 doesn't cost you the console), `MAX_REALERTS`,
 `HEALTH_ALERT_AFTER_MINUTES`.
 
-Don't push the interval below ~30 seconds. It doesn't meaningfully improve
+Don't push the interval below ~20 seconds. It doesn't meaningfully improve
 your odds and it makes you look like exactly the traffic pattern these
 sites block.
 
@@ -360,8 +450,8 @@ get a real push notification the moment they post, with no infrastructure
 to break. Five seconds of setup, and it is more dependable than anything
 in this repo.
 
-**`feeds.py` also does it automatically**, on by default, and forwards
-matching posts to the same Discord channel. But be clear-eyed about it: X
+**`feeds.py` can also do it automatically** and forwards
+matching posts to the same Discord channel when `ENABLE_FEED_WATCH=1`. But be clear-eyed about it: X
 has no free API and Nitter shut down in 2024, so this depends on RSSHub
 mirrors that rate-limit and disappear. It tries several per account and
 fails silently when they're all down — it will not warn you, because a

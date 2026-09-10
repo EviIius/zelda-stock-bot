@@ -33,6 +33,7 @@ Install:
 from __future__ import annotations
 
 import re
+import threading
 
 import config
 import detect
@@ -40,6 +41,12 @@ from detect import Result, Status
 
 BUY_TEXT = re.compile(r"add to cart|add for shipping|pre-?order|buy now|ship it|add to bag", re.I)
 SOLD_TEXT = re.compile(r"sold out|out of stock|not available|unavailable|notify me|coming soon", re.I)
+#: A control that has REPLACED the buy button. Not a buy control itself, but
+#: its presence is proof you cannot buy the item -- Best Buy renders a
+#: disabled "Coming Soon" in place of "Add to Cart" while its JSON-LD still
+#: advertises schema.org/InStock.
+BLOCKED_CONTROL = re.compile(r"coming soon|sold out|out of stock|currently unavailable|"
+                             r"notify me|join waitlist|email me", re.I)
 
 #: Fulfilment methods named in the panel.
 METHOD_WORDS = ("pickup", "delivery", "shipping")
@@ -148,6 +155,13 @@ def _decide(probe: dict) -> Result:
         labels = [b["text"] or b["dt"] for b in candidates][:3]
         return Result(Status.OUT_OF_STOCK, f"buy control(s) disabled: {labels}", "browser")
 
+    # No buy control, but a control that stands in its place.
+    blocked = [b for b in buttons if BLOCKED_CONTROL.search(b["text"])]
+    if blocked:
+        labels = [b["text"] for b in blocked][:3]
+        return Result(Status.OUT_OF_STOCK,
+                      f"buy button replaced by {labels}", "browser")
+
     if verdict == "live":
         return Result(Status.UNKNOWN,
                       f"fulfilment looks available but no buy control found ({details})", "browser")
@@ -164,6 +178,8 @@ window.chrome = window.chrome || {runtime: {}};
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+_TLS = threading.local()
 
 
 def _launch(pw):
@@ -198,6 +214,41 @@ def _context(browser):
     return context
 
 
+def _session():
+    """Return a browser page owned by the current worker thread."""
+    cached = getattr(_TLS, "browser_session", None)
+    if cached is not None:
+        return cached
+
+    from playwright.sync_api import sync_playwright
+
+    playwright = sync_playwright().start()
+    browser, flavour = _launch(playwright)
+    context = _context(browser)
+    cached = {
+        "playwright": playwright,
+        "browser": browser,
+        "context": context,
+        "page": context.new_page(),
+        "flavour": flavour,
+    }
+    _TLS.browser_session = cached
+    return cached
+
+
+def close_thread_session() -> None:
+    """Close the persistent browser belonging to the current thread."""
+    cached = getattr(_TLS, "browser_session", None)
+    if cached is None:
+        return
+    for key in ("context", "browser", "playwright"):
+        try:
+            cached[key].close() if key != "playwright" else cached[key].stop()
+        except Exception:  # noqa: BLE001
+            pass
+    _TLS.browser_session = None
+
+
 def _settle(page):
     from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -215,7 +266,8 @@ BLOCK_MARKERS = ("pardon our interruption", "are you a human", "verify you are a
                  "unusual traffic", "access denied", "robot or human",
                  "activity on this site has been disabled", "verify your identity",
                  "please verify", "px-captcha", "checking your browser",
-                 "enable javascript and cookies")
+                 "enable javascript and cookies", "attention required!", "cloudflare ray id",
+                 "cf-chl-")
 
 
 def probe_page(product: dict) -> dict | None:
@@ -225,48 +277,41 @@ def probe_page(product: dict) -> dict | None:
     except ImportError:
         return None
 
-    with sync_playwright() as pw:
-        browser, flavour = _launch(pw)
+    cached = _session()
+    page = cached["page"]
+
+    nav_error = None
+    for wait_until in ("domcontentloaded", "load", "commit"):
         try:
-            page = _context(browser).new_page()
-
+            page.goto(product["url"], wait_until=wait_until,
+                      timeout=config.BROWSER_TIMEOUT_MS)
             nav_error = None
-            for wait_until in ("domcontentloaded", "load", "commit"):
-                try:
-                    page.goto(product["url"], wait_until=wait_until,
-                              timeout=config.BROWSER_TIMEOUT_MS)
-                    nav_error = None
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    nav_error = f"{type(exc).__name__}: {str(exc).splitlines()[0][:150]}"
-            _settle(page)
+            break
+        except Exception as exc:  # noqa: BLE001
+            nav_error = f"{type(exc).__name__}: {str(exc).splitlines()[0][:150]}"
+    _settle(page)
 
-            try:
-                body = (page.inner_text("body") or "").lower()
-            except Exception:  # noqa: BLE001
-                body = ""
-            try:
-                probe = page.evaluate(PROBE)
-            except Exception:  # noqa: BLE001
-                probe = {"btns": [], "fulfil": []}
+    try:
+        body = (page.inner_text("body") or "").lower()
+    except Exception:  # noqa: BLE001
+        body = ""
+    try:
+        probe = page.evaluate(PROBE)
+    except Exception:  # noqa: BLE001
+        probe = {"btns": [], "fulfil": []}
 
-            probe["_blocked"] = any(m in body for m in BLOCK_MARKERS)
-            probe["_browser"] = flavour
-            probe["_body"] = body
-            # Everything below is for --probe: when a page yields nothing,
-            # these are what tell you whether it was a challenge page, a
-            # redirect, or simply an empty shell that never hydrated.
-            try:
-                probe["_html"] = page.content().lower()
-            except Exception:  # noqa: BLE001
-                probe["_html"] = ""
-            probe["_title"] = page.title()
-            probe["_final_url"] = page.url
-            probe["_nav_error"] = nav_error
-            probe["_body_len"] = len(body)
-            return probe
-        finally:
-            browser.close()
+    probe["_blocked"] = any(m in body for m in BLOCK_MARKERS)
+    probe["_browser"] = cached["flavour"]
+    probe["_body"] = body
+    try:
+        probe["_html"] = page.content().lower()
+    except Exception:  # noqa: BLE001
+        probe["_html"] = ""
+    probe["_title"] = page.title()
+    probe["_final_url"] = page.url
+    probe["_nav_error"] = nav_error
+    probe["_body_len"] = len(body)
+    return probe
 
 
 def capture_buybox(product: dict) -> bytes | None:
@@ -283,25 +328,21 @@ def capture_buybox(product: dict) -> bytes | None:
         return None
 
     try:
-        with sync_playwright() as pw:
-            browser, _ = _launch(pw)
+        page = _session()["page"]
+        page.goto(product["url"], wait_until="domcontentloaded",
+                  timeout=config.BROWSER_TIMEOUT_MS)
+        _settle(page)
+        for selector in ('[data-test*="fulfillment"]', '[data-test*="add-to-cart"]',
+                         '[data-test*="AddToCart"]', "main"):
             try:
-                page = _context(browser).new_page()
-                page.goto(product["url"], wait_until="domcontentloaded",
-                          timeout=config.BROWSER_TIMEOUT_MS)
-                _settle(page)
-                for selector in ('[data-test*="fulfillment"]', '[data-test*="add-to-cart"]',
-                                 '[data-test*="AddToCart"]', "main"):
-                    try:
-                        element = page.query_selector(selector)
-                        if element:
-                            return element.screenshot(type="png")
-                    except Exception:  # noqa: BLE001
-                        continue
-                return page.screenshot(type="png")
-            finally:
-                browser.close()
+                element = page.query_selector(selector)
+                if element:
+                    return element.screenshot(type="png")
+            except Exception:  # noqa: BLE001
+                continue
+        return page.screenshot(type="png")
     except Exception:  # noqa: BLE001
+        close_thread_session()
         return None
 
 
@@ -331,11 +372,22 @@ def check(product: dict) -> Result | None:
     # renders no cart button at all when unavailable, but its app state says
     # "availabilityStatus":"OUT_OF_STOCK" plainly.
     html = probe.get("_html") or ""
+    dom = _decide(probe)
+
     if html:
         for layer in (detect._jsonld, detect._embedded_state):
             structured = layer(html)
-            if structured is not None:
-                structured.source = "browser+" + structured.source
-                return structured
+            if structured is None:
+                continue
+            structured.source = "browser+" + structured.source
+            # The DOM is the tie-breaker for optimistic structured data:
+            # Best Buy advertises schema.org/InStock next to a disabled
+            # "Coming Soon" button. A disabled buy control is proof you
+            # cannot buy it, whatever the metadata says.
+            if structured.status in detect.ALERTABLE and dom.status is Status.OUT_OF_STOCK:
+                dom.reason = (f"{dom.reason} (overrides {structured.source} "
+                              f"claiming {structured.status.value})")
+                return dom
+            return structured
 
-    return _decide(probe)
+    return dom
