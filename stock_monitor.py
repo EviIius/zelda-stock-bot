@@ -264,7 +264,8 @@ def build_alert(product: dict, result: detect.Result, repeat: int,
 
     group = product.get("group", "console")
     item = product.get("product_name", product["name"])
-    item_icon = "🎮" if group == "controller" else "🖥️"
+    item_icon = ("📦" if product.get("custom") else
+                 "🎮" if group == "controller" else "🖥️")
     title = f"{ICON[result.status]} {headline} • {product['name']}"
     if repeat > 1:
         title += f" (reminder {repeat})"
@@ -533,7 +534,8 @@ def process_result(product: dict, state: dict, result: detect.Result,
         entry["last_latency_seconds"] = round(latency, 2)
         entry["next_check_ts"] = current + int(product.get("interval", config.CHECK_INTERVAL))
 
-    group_mark = "CTRL" if product.get("group") == "controller" else "CONS"
+    group_mark = ("ITEM" if product.get("custom") else
+                  "CTRL" if product.get("group") == "controller" else "CONS")
     line = (f"  {CONSOLE_MARK[result.status]:<7} [{group_mark}] {product['name']:<30} {result.status.value} "
             f"({latency:.1f}s)")
     if result.price:
@@ -945,6 +947,8 @@ def main() -> int:
 
     channels = notify.configured_channels()
     print(f"[{stamp()}] notification channels: {', '.join(channels) or 'NONE CONFIGURED'}")
+    for catalog_error in getattr(config, "CUSTOM_PRODUCT_ERRORS", []):
+        print(f"  custom catalog warning: {catalog_error}", flush=True)
     if not channels:
         print("  !! Nothing will reach you. Set DISCORD_WEBHOOK_URL at minimum.")
 

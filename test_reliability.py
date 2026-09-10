@@ -14,6 +14,7 @@ from unittest import mock
 import config
 import detect
 import notify
+import product_catalog
 import stock_monitor
 import watchdog
 from detect import Result, Status
@@ -329,7 +330,7 @@ class ReliabilityTests(unittest.TestCase):
         self.assertNotIn('run_service.ps1', installer)
         self.assertIn('stock_bot_ui.py', installer)
         self.assertIn('CreateShortcut', installer)
-        self.assertIn('Zelda Stock Bot.lnk', installer)
+        self.assertIn('Stock Watch.lnk', installer)
 
     def test_windows_ui_stops_watchdog_before_monitor(self):
         root = os.path.dirname(os.path.abspath(__file__))
@@ -340,6 +341,53 @@ class ReliabilityTests(unittest.TestCase):
                         stop_body.index('"/End", "/TN", MONITOR_TASK'))
         self.assertIn("CREATE_NO_WINDOW", panel)
         self.assertIn("Live retailer feed", panel)
+        self.assertIn("Add link", panel)
+        self.assertIn("product_catalog.save_custom_products", panel)
+
+    def test_custom_product_catalog_round_trip_and_retailer_inference(self):
+        path = os.path.join(self.tmp.name, "custom-products.json")
+        saved = product_catalog.save_custom_products([{
+            "url": "https://www.target.com/p/example-item/-/A-123456789",
+            "product_name": "Example item",
+            "interval": 25,
+        }], path)
+        loaded, errors = product_catalog.load_custom_products(path)
+        self.assertEqual(errors, [])
+        self.assertEqual(loaded, saved)
+        self.assertEqual(loaded[0]["name"], "Target")
+        self.assertEqual(loaded[0]["tcin"], "123456789")
+        self.assertTrue(loaded[0]["custom"])
+
+    def test_custom_listing_requires_phrase_and_safe_url(self):
+        with self.assertRaisesRegex(ValueError, "needs a phrase"):
+            product_catalog.normalize_product({
+                "url": "https://example.test/listing", "kind": "appears",
+            })
+        with self.assertRaisesRegex(ValueError, "complete http"):
+            product_catalog.normalize_product({"url": "file:///private/item"})
+
+    def test_custom_walmart_link_gets_exact_item_status_and_cart_urls(self):
+        item = product_catalog.normalize_product({
+            "url": "https://www.walmart.com/ip/example/21002656445", "interval": 60,
+        })
+        self.assertEqual(item["item_id"], "21002656445")
+        self.assertEqual(item["status_url"],
+                         "https://www.walmart.com/search?q=21002656445")
+        self.assertIn("items=21002656445", item["cart_url"])
+        self.assertFalse(item["use_browser"])
+
+    def test_custom_product_alert_uses_generic_identity(self):
+        product = product_catalog.normalize_product({
+            "url": "https://shop.example.test/products/limited-widget",
+            "product_name": "Limited Widget", "interval": 60,
+        })
+        alert = stock_monitor.build_alert(
+            product, Result(Status.IN_STOCK, "structured stock", "json-ld"), 1,
+        )
+        self.assertTrue(alert.body.startswith("## 📦 Limited Widget"))
+        payload = notify._discord_payload(alert)
+        self.assertEqual(payload["embeds"][0]["author"]["name"],
+                         "📦 PRODUCT STOCK WATCH")
 
     def test_walmart_and_bestbuy_never_launch_a_browser(self):
         http_only = [p for p in config.PRODUCTS if p["name"] in {"Walmart", "Best Buy"}]

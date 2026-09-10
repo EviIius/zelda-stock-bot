@@ -116,10 +116,11 @@ def _discord_payload(alert: Alert) -> dict:
         "color": COLORS.get(alert.kind, 0x95A5A6),
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "footer": {"text": (alert.footer or "Zelda Switch 2 monitor")[:2048]},
-        "author": {"name": ("🎮 CONTROLLER STOCK WATCH" if alert.group == "controller"
+        "footer": {"text": (alert.footer or "Stock Watch")[:2048]},
+        "author": {"name": ("📦 PRODUCT STOCK WATCH" if alert.body.startswith("## 📦")
+                            else "🎮 CONTROLLER STOCK WATCH" if alert.group == "controller"
                             else "🖥️ CONSOLE STOCK WATCH" if alert.group == "console"
-                            else "🛰️ ZELDA STOCK WATCH")},
+                            else "🛰️ STOCK WATCH")},
     }
     if alert.url:
         embed["url"] = alert.url

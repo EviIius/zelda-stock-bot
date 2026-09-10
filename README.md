@@ -313,12 +313,32 @@ alerts.
 
 ### Windows control panel
 
-The Windows installer also creates a **Zelda Stock Bot** shortcut on the
+The Windows installer also creates a **Stock Watch** shortcut on the
 desktop. It opens a native control panel—without a Command Prompt window—with
 Start, Stop, and Restart controls and a live, color-coded feed of every retained
 stock, pre-order, out-of-stock, blocked, and error result. Closing the panel
 leaves monitoring active. **Stop Bot** disables both scheduled tasks so the
 watchdog does not restart a monitor that you intentionally stopped.
+
+Select **Products** in the control panel to manage additional links without
+editing Python:
+
+- **Stock / preorder** watches a product page for a trustworthy structured or
+  rendered buyable signal.
+- **Listing goes live** watches a search or category page for a distinctive
+  phrase, which is useful before a retailer publishes a product page.
+- Each custom item can use the primary or secondary Discord webhook, its own
+  polling interval, and an optional direct-cart URL.
+- Saving, enabling, disabling, or removing an item safely restarts the service
+  so the updated catalog takes effect immediately. Built-in Zelda monitors are
+  kept separately and are never overwritten.
+
+Custom links are stored locally in `custom_products.json`. The file is ignored
+by Git so personal shopping links do not get committed accidentally. The
+catalog accepts up to 50 items and rejects malformed/non-web URLs. Known
+Target and Walmart identifiers are extracted automatically; other stores use
+the conservative generic detector and will return unknown instead of sending a
+weak or unverified stock alert.
 
 ---
 

@@ -243,6 +243,15 @@ PRODUCTS = [
     },
 ]
 
+# User-added links are stored separately so upgrading the built-in Zelda
+# monitors can never overwrite the personal catalog.
+from product_catalog import load_custom_products  # noqa: E402
+
+_BUILTIN_PRODUCT_KEYS = {product["key"] for product in PRODUCTS}
+CUSTOM_PRODUCTS, CUSTOM_PRODUCT_ERRORS = load_custom_products()
+PRODUCTS.extend(product for product in CUSTOM_PRODUCTS
+                if product["key"] not in _BUILTIN_PRODUCT_KEYS)
+
 
 # ---------------------------------------------------------------------------
 # Timing
