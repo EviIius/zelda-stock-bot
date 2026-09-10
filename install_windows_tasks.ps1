@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 $repoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $monitorScript = Join-Path $repoDir "stock_monitor.py"
 $watchdogScript = Join-Path $repoDir "watchdog.py"
+$uiScript = Join-Path $repoDir "stock_bot_ui.py"
 $python = (Get-Command python).Source
 $pythonw = Join-Path (Split-Path -Parent $python) "pythonw.exe"
 if (-not (Test-Path -LiteralPath $pythonw)) {
@@ -51,7 +52,18 @@ Register-ScheduledTask -TaskName "Zelda Stock Monitor Watchdog" -Action $watchdo
     -Trigger $watchdogTrigger -Settings $watchdogSettings `
     -Description "Alerts when the Zelda stock monitor heartbeat stops" -Force | Out-Null
 
+$desktop = [Environment]::GetFolderPath("Desktop")
+$shortcutPath = Join-Path $desktop "Zelda Stock Bot.lnk"
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $pythonw
+$shortcut.Arguments = ('"{0}"' -f $uiScript)
+$shortcut.WorkingDirectory = $repoDir
+$shortcut.Description = "Open the Zelda Stock Bot control panel"
+$shortcut.Save()
+
 Start-ScheduledTask -TaskName "Zelda Stock Monitor"
 Write-Host "Installed and started 'Zelda Stock Monitor'."
 Write-Host "Installed 'Zelda Stock Monitor Watchdog' (runs every two minutes)."
 Write-Host "The monitor runs directly under Task Scheduler with no console window."
+Write-Host "Created desktop shortcut 'Zelda Stock Bot'."

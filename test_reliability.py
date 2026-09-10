@@ -327,6 +327,19 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn('--service-log', installer)
         self.assertIn('-WorkingDirectory $repoDir', installer)
         self.assertNotIn('run_service.ps1', installer)
+        self.assertIn('stock_bot_ui.py', installer)
+        self.assertIn('CreateShortcut', installer)
+        self.assertIn('Zelda Stock Bot.lnk', installer)
+
+    def test_windows_ui_stops_watchdog_before_monitor(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "stock_bot_ui.py"), encoding="utf-8") as handle:
+            panel = handle.read()
+        stop_body = panel.split("def stop_bot()", 1)[1].split("def restart_bot()", 1)[0]
+        self.assertLess(stop_body.index("WATCHDOG_TASK, False"),
+                        stop_body.index('"/End", "/TN", MONITOR_TASK'))
+        self.assertIn("CREATE_NO_WINDOW", panel)
+        self.assertIn("Live retailer feed", panel)
 
     def test_walmart_and_bestbuy_never_launch_a_browser(self):
         http_only = [p for p in config.PRODUCTS if p["name"] in {"Walmart", "Best Buy"}]

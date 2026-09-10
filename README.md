@@ -311,6 +311,15 @@ Discord. Output goes to the bounded rotating log `logs/windows-monitor.log`,
 and a Windows mutex prevents duplicate local loops from producing duplicate
 alerts.
 
+### Windows control panel
+
+The Windows installer also creates a **Zelda Stock Bot** shortcut on the
+desktop. It opens a native control panel—without a Command Prompt window—with
+Start, Stop, and Restart controls and a live, color-coded feed of every retained
+stock, pre-order, out-of-stock, blocked, and error result. Closing the panel
+leaves monitoring active. **Stop Bot** disables both scheduled tasks so the
+watchdog does not restart a monitor that you intentionally stopped.
+
 ---
 
 ## Optional upgrades
