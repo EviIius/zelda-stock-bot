@@ -5,10 +5,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 
 import config
 import notify
+
+
+WINDOWS_MONITOR_TASK = "Zelda Stock Monitor"
+
+
+def _restart_windows_monitor() -> tuple[bool, str]:
+    """Restart the directly managed Windows task after a stale heartbeat."""
+    if os.name != "nt":
+        return False, "automatic restart is only configured on Windows"
+    schtasks = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                            "System32", "schtasks.exe")
+    subprocess.run(
+        [schtasks, "/End", "/TN", WINDOWS_MONITOR_TASK],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=20, check=False,
+    )
+    time.sleep(1)
+    started = subprocess.run(
+        [schtasks, "/Run", "/TN", WINDOWS_MONITOR_TASK],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=20, check=False,
+    )
+    if started.returncode == 0:
+        return True, "Windows restart requested successfully"
+    return False, f"Windows task restart failed with code {started.returncode}"
 
 
 def _load(path: str) -> dict:
@@ -34,8 +60,11 @@ def check(test_alert: bool = False) -> int:
     stale = test_alert or not heartbeat or age > config.WATCHDOG_STALE_SECONDS
 
     if stale:
+        restarted, restart_note = ((False, "test mode; no restart requested")
+                                   if test_alert else _restart_windows_monitor())
         if not test_alert and time.time() - float(state.get("last_alert_ts", 0)) < 600:
-            return 1
+            print(restart_note)
+            return 0 if restarted else 1
         reason = "Watchdog test requested." if test_alert else (
             "No runtime heartbeat exists." if not heartbeat else
             f"The last runtime heartbeat is {int(age)} seconds old."
@@ -45,7 +74,7 @@ def check(test_alert: bool = False) -> int:
                 title=("✅ Zelda watchdog test" if test_alert
                        else "🚨 Zelda monitor heartbeat is stale"),
                 body=(f"{reason}\n\nThe watchdog is alive, but the monitor may be stopped "
-                      "or stalled. Windows will attempt to restart it automatically."),
+                      f"or stalled. {restart_note}."),
                 urgent=True, kind="health",
                 group="all",
             )
@@ -55,7 +84,7 @@ def check(test_alert: bool = False) -> int:
         if delivered and not test_alert:
             state.update({"last_alert_ts": time.time(), "was_stale": True})
             _save(config.WATCHDOG_STATE_FILE, state)
-        return 0 if delivered else 2
+        return 0 if delivered and (restarted or test_alert) else 2
 
     if state.get("was_stale"):
         results = notify.send(

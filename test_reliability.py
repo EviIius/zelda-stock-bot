@@ -135,10 +135,16 @@ class ReliabilityTests(unittest.TestCase):
     def test_watchdog_detects_stale_monitor(self):
         with open(config.RUNTIME_HEARTBEAT_FILE, "w", encoding="utf-8") as handle:
             json.dump({"timestamp": 1, "pid": 123}, handle)
-        with mock.patch.object(notify, "send", return_value={"discord": "ok"}) as send:
+        with mock.patch.object(
+            watchdog, "_restart_windows_monitor",
+            return_value=(True, "restart requested"),
+        ) as restart, mock.patch.object(
+            notify, "send", return_value={"discord": "ok"}
+        ) as send:
             code = watchdog.check()
         self.assertEqual(code, 0)
         self.assertEqual(send.call_count, 1)
+        restart.assert_called_once_with()
         with open(config.WATCHDOG_STATE_FILE, encoding="utf-8") as handle:
             self.assertTrue(json.load(handle)["was_stale"])
 
@@ -317,6 +323,10 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn('-m playwright install chromium', installer)
         self.assertIn('-m unittest discover', installer)
         self.assertIn('sys.version_info < (3, 11)', installer)
+        self.assertIn('"pythonw.exe"', installer)
+        self.assertIn('--service-log', installer)
+        self.assertIn('-WorkingDirectory $repoDir', installer)
+        self.assertNotIn('run_service.ps1', installer)
 
     def test_walmart_and_bestbuy_never_launch_a_browser(self):
         http_only = [p for p in config.PRODUCTS if p["name"] in {"Walmart", "Best Buy"}]

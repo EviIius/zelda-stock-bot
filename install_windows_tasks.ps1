@@ -1,10 +1,16 @@
 $ErrorActionPreference = "Stop"
 $repoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$serviceScript = Join-Path $repoDir "run_service.ps1"
+$monitorScript = Join-Path $repoDir "stock_monitor.py"
 $watchdogScript = Join-Path $repoDir "watchdog.py"
 $python = (Get-Command python).Source
-$powershell = (Get-Command powershell.exe).Source
+$pythonw = Join-Path (Split-Path -Parent $python) "pythonw.exe"
+if (-not (Test-Path -LiteralPath $pythonw)) {
+    $pythonw = $python
+}
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$logDir = Join-Path $repoDir "logs"
+$monitorLog = Join-Path $logDir "windows-monitor.log"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 & $python -c "import sys; raise SystemExit(sys.version_info < (3, 11))"
 if ($LASTEXITCODE -ne 0) {
@@ -24,9 +30,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Project self-tests failed; scheduled tasks were not installed."
 }
 
-$monitorAction = New-ScheduledTaskAction -Execute $powershell -Argument (
-    '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $serviceScript
-)
+$monitorAction = New-ScheduledTaskAction -Execute $pythonw -Argument (
+    '-u "{0}" --loop --service-log "{1}"' -f $monitorScript, $monitorLog
+) -WorkingDirectory $repoDir
 $monitorTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $monitorSettings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable `
@@ -34,7 +40,8 @@ $monitorSettings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterv
 Register-ScheduledTask -TaskName "Zelda Stock Monitor" -Action $monitorAction -Trigger $monitorTrigger `
     -Settings $monitorSettings -Description "Independent real-time retailer stock workers" -Force | Out-Null
 
-$watchdogAction = New-ScheduledTaskAction -Execute $python -Argument ('"{0}"' -f $watchdogScript)
+$watchdogAction = New-ScheduledTaskAction -Execute $pythonw -Argument ('"{0}"' -f $watchdogScript) `
+    -WorkingDirectory $repoDir
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes 2)
 $watchdogSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
@@ -47,3 +54,4 @@ Register-ScheduledTask -TaskName "Zelda Stock Monitor Watchdog" -Action $watchdo
 Start-ScheduledTask -TaskName "Zelda Stock Monitor"
 Write-Host "Installed and started 'Zelda Stock Monitor'."
 Write-Host "Installed 'Zelda Stock Monitor Watchdog' (runs every two minutes)."
+Write-Host "The monitor runs directly under Task Scheduler with no console window."

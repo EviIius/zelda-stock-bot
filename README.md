@@ -303,12 +303,13 @@ powershell -ExecutionPolicy Bypass -File .\install_windows_tasks.ps1
 
 The installer verifies Python 3.11+, installs the Python/browser dependencies
 and Chromium, runs the project self-tests, then installs two hidden scheduled
-tasks. `Zelda Stock Monitor` starts at logon
-and restarts after failures; `Zelda Stock Monitor Watchdog` runs independently
-every two minutes and alerts if the monitor heartbeat is stale. Service logs are
-retained for 14 days under `logs/`. The launcher removes a validated orphaned
-monitor process on restart, and a Windows mutex prevents duplicate local loops
-from producing duplicate alerts.
+tasks. `Zelda Stock Monitor` runs Python directly through Task Scheduler—there
+is no BAT file, PowerShell wrapper, or console window—and restarts after
+failures. `Zelda Stock Monitor Watchdog` runs independently every two minutes;
+if the heartbeat is stale it restarts the task and reports the outcome to
+Discord. Output goes to the bounded rotating log `logs/windows-monitor.log`,
+and a Windows mutex prevents duplicate local loops from producing duplicate
+alerts.
 
 ---
 

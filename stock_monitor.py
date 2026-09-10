@@ -910,7 +910,6 @@ def cmd_status() -> int:
 
 
 def main() -> int:
-    _configure_service_logging()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--loop", action="store_true", help="keep checking until stopped")
     parser.add_argument("--duration", type=int, default=0,
@@ -924,7 +923,12 @@ def main() -> int:
                         help="render one retailer and dump what the detector saw "
                              "(e.g. --probe target). The tool to reach for when a "
                              "verdict looks wrong.")
+    parser.add_argument("--service-log", metavar="PATH", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.service_log:
+        os.environ["SERVICE_LOG_FILE"] = os.path.abspath(args.service_log)
+    _configure_service_logging()
 
     if args.test_alert:
         return cmd_test_alert()
