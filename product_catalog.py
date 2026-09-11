@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parent
 CUSTOM_PRODUCTS_FILE = Path(os.environ.get(
     "CUSTOM_PRODUCTS_FILE", str(ROOT / "custom_products.json")
 ))
+PRODUCT_OVERRIDES_FILE = Path(os.environ.get(
+    "PRODUCT_OVERRIDES_FILE", str(ROOT / "product_overrides.json")
+))
 MAX_CUSTOM_PRODUCTS = 50
 RETAILERS = {
     "target.com": "Target",
@@ -173,3 +176,33 @@ def save_custom_products(products: list[dict], path: Path | str = CUSTOM_PRODUCT
                          encoding="utf-8")
     os.replace(temporary, destination)
     return normalized
+
+
+def load_product_overrides(path: Path | str = PRODUCT_OVERRIDES_FILE) -> dict[str, bool]:
+    source = Path(path)
+    if not source.exists():
+        return {}
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): bool(enabled)
+        for key, enabled in value.items()
+        if re.fullmatch(r"[a-z0-9_-]{1,60}", str(key))
+    }
+
+
+def set_product_enabled(key: str, enabled: bool,
+                        path: Path | str = PRODUCT_OVERRIDES_FILE) -> None:
+    if not re.fullmatch(r"[a-z0-9_-]{1,60}", key):
+        raise ValueError("Invalid built-in product key")
+    destination = Path(path)
+    overrides = load_product_overrides(destination)
+    overrides[key] = bool(enabled)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(overrides, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)

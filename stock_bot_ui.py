@@ -253,81 +253,160 @@ class ProductEditor(tk.Toplevel):
 
 
 class ProductManager(tk.Toplevel):
+    """Unified view of protected built-ins and editable custom monitors."""
+
     def __init__(self, parent: "StockBotPanel", open_add: bool = False) -> None:
         super().__init__(parent)
         self.parent_panel = parent
-        self.title("Product monitors")
-        self.geometry("1040x500")
-        self.minsize(790, 400)
+        self.title("All product monitors")
+        self.geometry("1260x570")
+        self.minsize(900, 430)
         self.configure(bg=StockBotPanel.BG)
-        self.products, errors = product_catalog.load_custom_products()
+
+        import config
+        overrides = product_catalog.load_product_overrides()
+        self.builtin_products = [dict(product) for product in config.PRODUCTS
+                                 if not product.get("custom")]
+        for product in self.builtin_products:
+            if product["key"] in overrides:
+                product["enabled"] = overrides[product["key"]]
+        self.custom_products, errors = product_catalog.load_custom_products()
 
         header = ttk.Frame(self, style="Panel.TFrame", padding=14)
         header.pack(fill="x", padx=14, pady=(14, 8))
-        ttk.Label(header, text="Custom product monitors", style="Status.TLabel",
+        self.summary_var = tk.StringVar()
+        ttk.Label(header, text="All product monitors", style="Status.TLabel",
                   font=("Segoe UI Semibold", 15)).pack(anchor="w")
-        ttk.Label(
-            header,
-            text=("Your existing Zelda monitors remain active and protected. Add up to 50 more "
-                  "product or listing links here."),
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
+        ttk.Label(header, textvariable=self.summary_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(4, 0))
         if errors:
-            ttk.Label(header, text=" • ".join(errors), style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+            ttk.Label(header, text=" • ".join(errors), style="Muted.TLabel").pack(
+                anchor="w", pady=(4, 0))
 
         table_frame = ttk.Frame(self, style="Panel.TFrame", padding=8)
         table_frame.pack(fill="both", expand=True, padx=14)
-        columns = ("product", "store", "mode", "channel", "interval", "status")
+        columns = ("product", "store", "source", "mode", "channel", "interval", "status", "checked")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         headings = {
-            "product": "Product", "store": "Store", "mode": "Monitor", "channel": "Discord",
-            "interval": "Every", "status": "Status",
+            "product": "Product", "store": "Store", "source": "Source", "mode": "Monitor",
+            "channel": "Discord", "interval": "Every", "status": "Current status",
+            "checked": "Last checked",
         }
-        widths = {"product": 330, "store": 130, "mode": 130, "channel": 110,
-                  "interval": 75, "status": 80}
+        widths = {"product": 330, "store": 125, "source": 85, "mode": 120,
+                  "channel": 90, "interval": 65, "status": 115, "checked": 95}
         for column in columns:
             self.table.heading(column, text=headings[column])
             self.table.column(column, width=widths[column], minwidth=60,
                               stretch=column == "product")
+        self.table.tag_configure("builtin", foreground="#b8c0cc")
+        self.table.tag_configure("custom", foreground="#7dd3fc")
+        self.table.tag_configure("disabled", foreground="#687386")
         scroll = ttk.Scrollbar(table_frame, command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         self.table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.table.bind("<<TreeviewSelect>>", self._selection_changed)
         self.table.bind("<Double-1>", lambda _event: self._edit())
 
         actions = ttk.Frame(self, style="Panel.TFrame", padding=10)
         actions.pack(fill="x", padx=14, pady=(8, 14))
-        ttk.Button(actions, text="Add link", style="Action.TButton", command=self._add).pack(side="left", padx=4)
-        ttk.Button(actions, text="Edit", command=self._edit).pack(side="left", padx=4)
-        ttk.Button(actions, text="Enable / disable", command=self._toggle).pack(side="left", padx=4)
-        ttk.Button(actions, text="Test selected", command=self._test).pack(side="left", padx=4)
-        ttk.Button(actions, text="Remove", command=self._remove).pack(side="left", padx=4)
+        ttk.Button(actions, text="+ Add Product", style="Accent.TButton",
+                   command=self._add).pack(side="left", padx=4)
+        self.edit_button = ttk.Button(actions, text="Edit custom", command=self._edit)
+        self.edit_button.pack(side="left", padx=4)
+        self.toggle_button = ttk.Button(actions, text="Enable / disable", command=self._toggle)
+        self.toggle_button.pack(side="left", padx=4)
+        self.test_button = ttk.Button(actions, text="Test selected", command=self._test)
+        self.test_button.pack(side="left", padx=4)
+        self.remove_button = ttk.Button(actions, text="Remove custom", command=self._remove)
+        self.remove_button.pack(side="left", padx=4)
         ttk.Button(actions, text="Close", command=self.destroy).pack(side="right", padx=4)
+
         self._refresh()
+        self._selection_changed()
+        self.after(5000, self._periodic_refresh)
         if open_add:
             self.after(150, self._add)
 
-    def _refresh(self) -> None:
-        self.table.delete(*self.table.get_children())
-        for product in self.products:
-            self.table.insert("", "end", iid=product["key"], values=(
-                product["product_name"], product["name"],
-                "Listing phrase" if product["kind"] == "appears" else "Stock / preorder",
-                "Secondary" if product["group"] == "controller" else "Primary",
-                f"{product['interval']}s", "Enabled" if product["enabled"] else "Disabled",
-            ))
+    def _all_products(self) -> list[dict]:
+        return self.builtin_products + self.custom_products
 
-    def _selected_index(self) -> int | None:
+    @staticmethod
+    def _state() -> dict:
+        try:
+            value = json.loads((ROOT / "stock_state.json").read_text(encoding="utf-8"))
+            return value.get("products", {}) if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def _age(timestamp: object) -> str:
+        try:
+            seconds = max(0, int(time.time() - float(timestamp)))
+        except (TypeError, ValueError):
+            return "Not yet"
+        if seconds < 60:
+            return f"{seconds}s ago"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        return f"{seconds // 3600}h ago"
+
+    def _refresh(self) -> None:
+        selected = self.table.selection()
+        selected_key = selected[0] if selected else None
+        states = self._state()
+        self.table.delete(*self.table.get_children())
+        for product in self._all_products():
+            custom = bool(product.get("custom"))
+            entry = states.get(product["key"], {})
+            reading = entry.get("last_reading") or entry.get("status") or "starting"
+            tag = "disabled" if not product.get("enabled", True) else "custom" if custom else "builtin"
+            self.table.insert("", "end", iid=product["key"], tags=(tag,), values=(
+                product.get("product_name", product["name"]), product["name"],
+                "Custom" if custom else "Built-in",
+                "Listing phrase" if product.get("kind") == "appears" else "Stock / preorder",
+                "Secondary" if product.get("group") == "controller" else "Primary",
+                f"{product.get('interval', 60)}s",
+                "Disabled" if not product.get("enabled", True) else reading.replace("_", " ").title(),
+                self._age(entry.get("last_check_ts")),
+            ))
+        if selected_key and self.table.exists(selected_key):
+            self.table.selection_set(selected_key)
+        self.summary_var.set(
+            f"{len(self.builtin_products)} protected Zelda monitors  •  "
+            f"{len(self.custom_products)} custom monitors  •  "
+            "Built-ins can be disabled but not edited or removed"
+        )
+
+    def _periodic_refresh(self) -> None:
+        try:
+            if self.winfo_exists():
+                self._refresh()
+                self.after(5000, self._periodic_refresh)
+        except tk.TclError:
+            pass
+
+    def _selected_product(self, notify: bool = True) -> dict | None:
         selected = self.table.selection()
         if not selected:
-            messagebox.showinfo("Product monitors", "Select a product first.", parent=self)
+            if notify:
+                messagebox.showinfo("Product monitors", "Select a product first.", parent=self)
             return None
         key = selected[0]
-        return next((index for index, item in enumerate(self.products) if item["key"] == key), None)
+        return next((item for item in self._all_products() if item["key"] == key), None)
 
-    def _save_and_apply(self) -> None:
+    def _selection_changed(self, _event=None) -> None:
+        product = self._selected_product(notify=False)
+        selected_state = "normal" if product else "disabled"
+        self.toggle_button.configure(state=selected_state)
+        self.test_button.configure(state=selected_state)
+        custom_state = "normal" if product and product.get("custom") else "disabled"
+        self.edit_button.configure(state=custom_state)
+        self.remove_button.configure(state=custom_state)
+
+    def _save_custom_and_apply(self) -> None:
         try:
-            self.products = product_catalog.save_custom_products(self.products)
+            self.custom_products = product_catalog.save_custom_products(self.custom_products)
         except ValueError as exc:
             messagebox.showerror("Cannot save catalog", str(exc), parent=self)
             return
@@ -338,43 +417,52 @@ class ProductManager(tk.Toplevel):
         editor = ProductEditor(self)
         self.wait_window(editor)
         if editor.result:
-            if any(item["key"] == editor.result["key"] for item in self.products):
+            if any(item["key"] == editor.result["key"] for item in self._all_products()):
                 messagebox.showerror("Duplicate product", "That link is already being monitored.", parent=self)
                 return
-            self.products.append(editor.result)
-            self._save_and_apply()
+            self.custom_products.append(editor.result)
+            self._save_custom_and_apply()
 
     def _edit(self) -> None:
-        index = self._selected_index()
-        if index is None:
+        product = self._selected_product()
+        if not product or not product.get("custom"):
             return
-        editor = ProductEditor(self, self.products[index])
+        index = next(index for index, item in enumerate(self.custom_products)
+                     if item["key"] == product["key"])
+        editor = ProductEditor(self, product)
         self.wait_window(editor)
         if editor.result:
-            self.products[index] = editor.result
-            self._save_and_apply()
+            self.custom_products[index] = editor.result
+            self._save_custom_and_apply()
 
     def _toggle(self) -> None:
-        index = self._selected_index()
-        if index is None:
+        product = self._selected_product()
+        if not product:
             return
-        self.products[index]["enabled"] = not self.products[index].get("enabled", True)
-        self._save_and_apply()
+        enabled = not product.get("enabled", True)
+        product["enabled"] = enabled
+        if product.get("custom"):
+            self._save_custom_and_apply()
+        else:
+            product_catalog.set_product_enabled(product["key"], enabled)
+            self._refresh()
+            self.parent_panel._run_action("Applying monitor setting", restart_bot)
 
     def _remove(self) -> None:
-        index = self._selected_index()
-        if index is None:
+        product = self._selected_product()
+        if not product or not product.get("custom"):
             return
         if messagebox.askyesno("Remove product monitor?",
-                               f"Stop monitoring {self.products[index]['product_name']}?", parent=self):
-            del self.products[index]
-            self._save_and_apply()
+                               f"Stop monitoring {product['product_name']}?", parent=self):
+            self.custom_products = [item for item in self.custom_products
+                                    if item["key"] != product["key"]]
+            self._save_custom_and_apply()
 
     def _test(self) -> None:
-        index = self._selected_index()
-        if index is None:
+        product = self._selected_product()
+        if not product:
             return
-        product = dict(self.products[index])
+        product = dict(product)
 
         def worker() -> None:
             try:
@@ -427,6 +515,14 @@ class StockBotPanel(tk.Tk):
                         background="#2563eb", foreground="white")
         style.map("Accent.TButton", background=[("active", "#3b82f6")],
                   foreground=[("active", "white")])
+        style.configure("Treeview", background="#0b0f14", foreground="#d8dee9",
+                        fieldbackground="#0b0f14", borderwidth=0, rowheight=28,
+                        font=("Segoe UI", 9))
+        style.map("Treeview", background=[("selected", "#25476a")],
+                  foreground=[("selected", "white")])
+        style.configure("Treeview.Heading", background="#232a36", foreground="#e6edf3",
+                        relief="flat", font=("Segoe UI Semibold", 9), padding=(6, 7))
+        style.map("Treeview.Heading", background=[("active", "#303949")])
         style.configure("TCheckbutton", background=self.PANEL, foreground=self.TEXT)
         style.map("TCheckbutton", background=[("active", self.PANEL)])
 
@@ -482,14 +578,17 @@ class StockBotPanel(tk.Tk):
         feed_frame.pack(fill="both", expand=True, padx=14, pady=(0, 8))
         scrollbar = ttk.Scrollbar(feed_frame)
         scrollbar.pack(side="right", fill="y")
+        horizontal = ttk.Scrollbar(feed_frame, orient="horizontal")
+        horizontal.pack(side="bottom", fill="x")
         self.feed = tk.Text(
             feed_frame, bg="#090c11", fg="#d8dee9", insertbackground="white",
             selectbackground="#334155", relief="flat", wrap="none",
             font=("Cascadia Mono", 9), padx=10, pady=10,
-            yscrollcommand=scrollbar.set,
+            yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set,
         )
         self.feed.pack(fill="both", expand=True)
         scrollbar.config(command=self.feed.yview)
+        horizontal.config(command=self.feed.xview)
         for tag, color in {
             "stock": "#42d392", "preorder": "#ffd166", "out": "#a9b1bc",
             "blocked": "#ff9f43", "error": "#ff667a", "unknown": "#c792ea",
@@ -634,6 +733,8 @@ def main() -> None:
     panel = StockBotPanel()
     if "--show-guide" in sys.argv:
         panel.after(500, panel._show_product_help)
+    if "--show-products" in sys.argv:
+        panel.after(500, panel._open_products)
     panel.mainloop()
 
 

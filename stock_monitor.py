@@ -536,8 +536,9 @@ def process_result(product: dict, state: dict, result: detect.Result,
 
     group_mark = ("ITEM" if product.get("custom") else
                   "CTRL" if product.get("group") == "controller" else "CONS")
-    line = (f"  {CONSOLE_MARK[result.status]:<7} [{group_mark}] {product['name']:<30} {result.status.value} "
-            f"({latency:.1f}s)")
+    item_name = product.get("product_name", product["name"])
+    line = (f"  {CONSOLE_MARK[result.status]:<7} [{group_mark}] {product['name']} — "
+            f"{item_name}  {result.status.value} ({latency:.1f}s)")
     if result.price:
         line += f"  {result.price}"
     print(line, flush=True)

@@ -342,11 +342,15 @@ class ReliabilityTests(unittest.TestCase):
         self.assertIn("CREATE_NO_WINDOW", panel)
         self.assertIn("_wait_for_pid_exit(old_pid)", panel)
         self.assertIn("Live retailer feed", panel)
-        self.assertIn("Add link", panel)
         self.assertIn("product_catalog.save_custom_products", panel)
         self.assertIn("+ Add Product", panel)
         self.assertIn("How it works", panel)
         self.assertIn("--show-guide", panel)
+        self.assertIn("--show-products", panel)
+        self.assertIn("All product monitors", panel)
+        self.assertIn('"Built-in"', panel)
+        self.assertIn("Current status", panel)
+        self.assertIn("load_product_overrides", panel)
 
     def test_custom_product_catalog_round_trip_and_retailer_inference(self):
         path = os.path.join(self.tmp.name, "custom-products.json")
@@ -392,6 +396,27 @@ class ReliabilityTests(unittest.TestCase):
         payload = notify._discord_payload(alert)
         self.assertEqual(payload["embeds"][0]["author"]["name"],
                          "📦 PRODUCT STOCK WATCH")
+
+    def test_builtin_product_enabled_override_round_trip(self):
+        path = os.path.join(self.tmp.name, "overrides.json")
+        product_catalog.set_product_enabled("target", False, path)
+        product_catalog.set_product_enabled("controller_target", True, path)
+        self.assertEqual(product_catalog.load_product_overrides(path), {
+            "target": False, "controller_target": True,
+        })
+
+    def test_live_feed_line_identifies_retailer_and_product(self):
+        product = product_catalog.normalize_product({
+            "url": "https://shop.example.test/products/limited-widget",
+            "product_name": "Limited Widget", "name": "Example Shop", "interval": 60,
+        })
+        state = stock_monitor.load_state()
+        with mock.patch.object(stock_monitor, "log_check"), mock.patch("builtins.print") as output:
+            stock_monitor.process_result(
+                product, state, Result(Status.OUT_OF_STOCK, "not available", "json-ld"), 0.2,
+            )
+        rendered = "\n".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("[ITEM] Example Shop — Limited Widget", rendered)
 
     def test_walmart_and_bestbuy_never_launch_a_browser(self):
         http_only = [p for p in config.PRODUCTS if p["name"] in {"Walmart", "Best Buy"}]

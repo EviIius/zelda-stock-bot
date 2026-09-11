@@ -341,6 +341,13 @@ Target and Walmart identifiers are extracted automatically; other stores use
 the conservative generic detector and will return unknown instead of sending a
 weak or unverified stock alert.
 
+**Manage products** is an all-monitors view: it includes every protected Zelda
+monitor and every custom item, along with source, mode, Discord destination,
+interval, current status, and last-check age. Built-ins can be enabled or
+disabled but cannot be edited or removed accidentally. Custom items support all
+controls. The live feed prints both retailer and product name for every result,
+so multiple products from the same store remain distinguishable.
+
 ---
 
 ## Optional upgrades

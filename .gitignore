@@ -16,4 +16,6 @@ logs/
 .zelda-stock-monitor.lock
 custom_products.json
 custom_products.json.tmp
+product_overrides.json
+product_overrides.json.tmp
 .DS_Store

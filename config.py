@@ -245,9 +245,13 @@ PRODUCTS = [
 
 # User-added links are stored separately so upgrading the built-in Zelda
 # monitors can never overwrite the personal catalog.
-from product_catalog import load_custom_products  # noqa: E402
+from product_catalog import load_custom_products, load_product_overrides  # noqa: E402
 
 _BUILTIN_PRODUCT_KEYS = {product["key"] for product in PRODUCTS}
+_PRODUCT_OVERRIDES = load_product_overrides()
+for _product in PRODUCTS:
+    if _product["key"] in _PRODUCT_OVERRIDES:
+        _product["enabled"] = _PRODUCT_OVERRIDES[_product["key"]]
 CUSTOM_PRODUCTS, CUSTOM_PRODUCT_ERRORS = load_custom_products()
 PRODUCTS.extend(product for product in CUSTOM_PRODUCTS
                 if product["key"] not in _BUILTIN_PRODUCT_KEYS)
